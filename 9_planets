@@ -115,17 +115,17 @@ SPEAR_DEFS = {
 
 # ==================== ANIMALS ====================
 ANIMAL_DEFS = {
-    "rabbit":       {"biome":"Forest","hp":2,  "speed_cpm":40,"vision_peak":2,"vision_max":3,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐇","spawn_rate":0.08},
+    "rabbit":       {"biome":"Forest","hp":2,  "speed_cpm":40,"vision_peak":2,"vision_max":3,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐇","spawn_rate":0.00},
     "young_rabbit":{"biome":"Forest","hp":1,  "speed_cpm":20,"vision_peak":2,"vision_max":3,  "group":(1,1),  "loot":{"meat":1},         "icon":"🐇","spawn_rate":0.00},
-    "squirrel":     {"biome":"Forest","hp":2,  "speed_cpm":15,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":2},         "icon":"🐿️","spawn_rate":0.06},
+    "squirrel":     {"biome":"Forest","hp":2,  "speed_cpm":15,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":2},         "icon":"🐿️","spawn_rate":0.00},
     "young_squirrel":{"biome":"Forest","hp":1,  "speed_cpm":15,"vision_peak":2.5,"vision_max":5,  "group":(1,1),  "loot":{"meat":1},         "icon":"🐿️","spawn_rate":0.00},
     "deer":         {"biome":"Forest","hp":20, "speed_cpm":30,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":15},        "icon":"🦌","spawn_rate":0.00},
     "young_deer":   {"biome":"Forest","hp":10, "speed_cpm":20,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":10},        "icon":"🦌","spawn_rate":0.00},
     "antelope":     {"biome":"Forest","hp":30, "speed_cpm":20,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":15},        "icon":"🐐","spawn_rate":0.00},
     "young_antelope":{"biome":"Forest","hp":15, "speed_cpm":10,"vision_peak":2.5,"vision_max":5,  "group":(1,1),  "loot":{"meat":10},        "icon":"🐐","spawn_rate":0.00},
-    "salmon":       {"biome":"Arctic","hp":5,  "speed_cpm":20,"vision_peak":3,"vision_max":6,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐟","spawn_rate":0.05},
-    "seal":         {"biome":"Arctic","hp":10, "speed_cpm":25,"vision_peak":5,"vision_max":10, "group":(2,4),  "loot":{"meat":6,"bone":3},"icon":"🦭","spawn_rate":0.03},
-    "penguin":      {"biome":"Arctic","hp":10, "speed_cpm":8, "vision_peak":5,"vision_max":10, "group":(50,50),"loot":{"meat":6,"bone":3},"icon":"🐧","spawn_rate":0.06,"panic":True},
+    "salmon":       {"biome":"Arctic","hp":5,  "speed_cpm":20,"vision_peak":3,"vision_max":6,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐟","spawn_rate":0.02},
+    "seal":         {"biome":"Arctic","hp":10, "speed_cpm":25,"vision_peak":5,"vision_max":10, "group":(2,4),  "loot":{"meat":6,"bone":3},"icon":"🦭","spawn_rate":0.01},
+    "penguin":      {"biome":"Arctic","hp":10, "speed_cpm":8, "vision_peak":5,"vision_max":10, "group":(50,50),"loot":{"meat":6,"bone":3},"icon":"🐧","spawn_rate":0.02,"panic":True},
 }
 
 # ==================== ACHIEVEMENTS ====================
@@ -1537,58 +1537,33 @@ class World:
     def seed_initial_animals(self, player, radius=FOG_RADIUS*2):
         if biome_at(player.x, player.y) != "Forest":
             return
-        half = int(radius)
-        # Ensure every 3x3 forest patch has a rabbit and a squirrel.
-        for base_x in range(int(player.x) - half, int(player.x) + half + 1, ANIMAL_GRID_SIZE):
-            for base_y in range(int(player.y) - half, int(player.y) + half + 1, ANIMAL_GRID_SIZE):
-                for animal_type in ("rabbit", "squirrel"):
-                    adef = ANIMAL_DEFS[animal_type]
-                    for _ in range(1 + (1 if random.random() < 0.5 else 0)):
-                        x = base_x + random.uniform(0.5, 1.8)
-                        y = base_y + random.uniform(0.5, 1.8)
-                        if biome_at(x, y) != "Forest":
-                            continue
-                        self.animals.append({
-                            "type": animal_type,
-                            "x": x,
-                            "y": y,
-                            "hp": adef["hp"],
-                            "max_hp": adef["hp"],
-                            "fleeing": False,
-                            "last_move": time.time(),
-                        })
-        for base_x in range(int(player.x) - half, int(player.x) + half + 1, 6):
-            for base_y in range(int(player.y) - half, int(player.y) + half + 1, 6):
-                adef = ANIMAL_DEFS["deer"]
-                x = base_x + random.uniform(1.0, 5.0)
-                y = base_y + random.uniform(1.0, 5.0)
-                if biome_at(x, y) != "Forest":
-                    continue
-                self.animals.append({
-                    "type": "deer",
-                    "x": x,
-                    "y": y,
-                    "hp": adef["hp"],
-                    "max_hp": adef["hp"],
-                    "fleeing": False,
-                    "last_move": time.time(),
-                })
-        for base_x in range(int(player.x) - half, int(player.x) + half + 1, 10):
-            for base_y in range(int(player.y) - half, int(player.y) + half + 1, 10):
-                adef = ANIMAL_DEFS["antelope"]
-                x = base_x + random.uniform(1.0, 9.0)
-                y = base_y + random.uniform(1.0, 9.0)
-                if biome_at(x, y) != "Forest":
-                    continue
-                self.animals.append({
-                    "type": "antelope",
-                    "x": x,
-                    "y": y,
-                    "hp": adef["hp"],
-                    "max_hp": adef["hp"],
-                    "fleeing": False,
-                    "last_move": time.time(),
-                })
+        def add_animal(animal_type, min_r, max_r):
+            angle = random.uniform(0, 2 * math.pi)
+            r = random.uniform(min_r, max_r)
+            x = player.x + r * math.cos(angle)
+            y = player.y + r * math.sin(angle)
+            if biome_at(x, y) != "Forest":
+                return
+            adef = ANIMAL_DEFS[animal_type]
+            self.animals.append({
+                "type": animal_type,
+                "x": x,
+                "y": y,
+                "hp": adef["hp"],
+                "max_hp": adef["hp"],
+                "fleeing": False,
+                "last_move": time.time(),
+            })
+
+        # Start with a few forest animals nearby: rare, but visible sometimes.
+        if random.random() < 0.40:
+            add_animal("rabbit", 4, min(radius - 2, 10))
+        if random.random() < 0.30:
+            add_animal("squirrel", 4, min(radius - 2, 10))
+        if random.random() < 0.12:
+            add_animal("deer", 8, min(radius - 2, 16))
+        if random.random() < 0.06:
+            add_animal("antelope", 10, min(radius - 2, 20))
 
     def spawn_young_animals(self, player):
         now = time.time()
@@ -1785,65 +1760,40 @@ class World:
         self.last_spawn = now
         cur_biome = biome_at(player.x, player.y)
         counts = {}
-        for a in self.animals: counts[a["type"]] = counts.get(a["type"],0)+1
+        for a in self.animals:
+            if abs(a["x"] - player.x) <= FOG_RADIUS * 2 and abs(a["y"] - player.y) <= FOG_RADIUS * 2:
+                counts[a["type"]] = counts.get(a["type"],0) + 1
 
-        # Special handling for Forest animals: rabbit and squirrel spawn based on cluster density
+        # Special handling for Forest animals: spawn just one nearby animal occasionally.
         if cur_biome == "Forest":
-            px, py = int(player.x), int(player.y)
-            clusters_in_area = 0
-            # Count clusters in 5x5 area (coordinates -2 to +2)
-            for dx in range(-2, 3):
-                for dy in range(-2, 3):
-                    pos = (px + dx, py + dy)
-                    if pos in self.clusters and self.clusters[pos].get("qty", 0) > 0:
-                        clusters_in_area += 1
-            avg_density = clusters_in_area / 25.0
-            spawn_chance = min(1.0, max(0.15, avg_density * 0.3 + 0.05))
-
-            if random.random() < spawn_chance:
-                for _ in range(1):
-                    animal_type = "rabbit" if random.random() < 0.65 else "squirrel"
+            forest_animals = sum(counts.get(t, 0) for t in ("rabbit", "squirrel", "deer", "antelope"))
+            if forest_animals == 0:
+                roll = random.random()
+                animal_type = None
+                if roll < 0.40:
+                    animal_type = "rabbit"
+                elif roll < 0.70:
+                    animal_type = "squirrel"
+                elif roll < 0.82:
+                    animal_type = "deer"
+                elif roll < 0.88:
+                    animal_type = "antelope"
+                if animal_type:
                     adef = ANIMAL_DEFS[animal_type]
-                    max_count = 3
-                    if counts.get(animal_type, 0) < max_count:
-                        angle = random.uniform(0, 2*math.pi)
-                        r = random.uniform(1, 8)
-                        gx = player.x + r * math.cos(angle)
-                        gy = player.y + r * math.sin(angle)
-                        ax = gx + random.uniform(-1.5, 1.5)
-                        ay = gy + random.uniform(-1.5, 1.5)
-                        self.animals.append({
-                            "type": animal_type, "x": ax, "y": ay,
-                            "hp": adef["hp"], "max_hp": adef["hp"],
-                            "fleeing": False, "last_move": now,
-                        })
-                        counts[animal_type] = counts.get(animal_type, 0) + 1
-
-            if counts.get("deer", 0) < 2 and random.random() < 0.10:
-                adef = ANIMAL_DEFS["deer"]
-                angle = random.uniform(0, 2*math.pi)
-                r = random.uniform(2, 10)
-                gx = player.x + r * math.cos(angle)
-                gy = player.y + r * math.sin(angle)
-                ax = gx + random.uniform(-2, 2)
-                ay = gy + random.uniform(-2, 2)
-                self.animals.append({"type": "deer", "x": ax, "y": ay,
-                                     "hp": adef["hp"], "max_hp": adef["hp"],
-                                     "fleeing": False, "last_move": now})
-                counts["deer"] = counts.get("deer", 0) + 1
-
-            if counts.get("antelope", 0) < 1 and random.random() < 0.08:
-                adef = ANIMAL_DEFS["antelope"]
-                angle = random.uniform(0, 2*math.pi)
-                r = random.uniform(3, 10)
-                gx = player.x + r * math.cos(angle)
-                gy = player.y + r * math.sin(angle)
-                ax = gx + random.uniform(-2, 2)
-                ay = gy + random.uniform(-2, 2)
-                self.animals.append({"type": "antelope", "x": ax, "y": ay,
-                                     "hp": adef["hp"], "max_hp": adef["hp"],
-                                     "fleeing": False, "last_move": now})
-                counts["antelope"] = counts.get("antelope", 0) + 1
+                    angle = random.uniform(0, 2*math.pi)
+                    if animal_type in ("rabbit", "squirrel"):
+                        min_r, max_r = 4, min(FOG_RADIUS - 2, 12)
+                    elif animal_type == "deer":
+                        min_r, max_r = 8, min(FOG_RADIUS - 2, 14)
+                    else:
+                        min_r, max_r = 10, min(FOG_RADIUS - 2, 16)
+                    r = random.uniform(min_r, max_r)
+                    gx = player.x + r * math.cos(angle)
+                    gy = player.y + r * math.sin(angle)
+                    self.animals.append({"type": animal_type, "x": gx, "y": gy,
+                                         "hp": adef["hp"], "max_hp": adef["hp"],
+                                         "fleeing": False, "last_move": now})
+                    counts[animal_type] = 1
 
         # Handle other animal types (salmon, seal, penguin in Arctic; these keep old spawn_rate logic)
         for atype, adef in ANIMAL_DEFS.items():
@@ -3228,13 +3178,15 @@ def main():
                 # ---- WALK ----
                 elif act == "walk" and arg:
                     if player.active_tasks: msg.append("🔨 Cannot walk while crafting!"); continue
-                    # Check if arg is coordinates (format: "5,3" or "@5,3")
-                    coords_str = arg.strip().lstrip("@")
+                    arg_clean = arg.strip().lower()
+                    if arg_clean.startswith("to "):
+                        arg_clean = arg_clean[3:].strip()
+                    # Check if arg is coordinates (format: "5,3", "@5,3", or "to 5,3")
+                    coords_str = arg_clean.lstrip("@ ").replace(" ","")
                     try:
                         if "," in coords_str:
-                            cx, cy = map(float, coords_str.split(","))
+                            cx, cy = map(float, coords_str.split(",", 1))
                             cx, cy = int(cx), int(cy)
-                            # Verify coordinates are within FOG_RADIUS
                             dist = math.hypot(cx - player.x, cy - player.y)
                             if dist <= FOG_RADIUS:
                                 player.start_auto_walk(cx, cy, world, msg)
@@ -3245,7 +3197,7 @@ def main():
                     except (ValueError, IndexError):
                         pass
                     # Otherwise search for resource by name
-                    search = arg.lower().replace("to ","").strip()
+                    search = arg_clean.replace("to ","").strip()
                     best = None; bd = 9999
                     for c in world.clusters.values():
                         if (search in c["real_item"] or search in c["name"].lower() or
@@ -3476,5 +3428,4 @@ def main():
                 print(f"\n⚠️ Auto-save failed: {e}")
 
 if __name__ == "__main__": main()
-
 

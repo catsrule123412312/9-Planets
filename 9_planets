@@ -327,6 +327,12 @@ food_effects = {
     "glowing_berries":   {"energy": 70, "hunger": 60, "health": 0,   "thirst": -10, "risk": "high",     "risk_min": 0.45, "risk_max": 0.65, "risk_dmg": 20},
     "poisonous_berry":   {"energy": 0,  "hunger": 0,  "health": -20, "thirst": 5,   "notes": "☠️ Poisonous Berry! -20 HP"},
     "jerky":             {"energy":10, "hunger":40, "health":0,  "thirst":-5, "notes":"🥩 Dried meat. Extremely filling, low thirst."},
+    "roasted_meat":      {"energy":15, "hunger":60, "health":10, "thirst":-10, "notes":"🔥 Savory roasted meat."},
+    "thick_cut_meat":    {"energy":20, "hunger":85, "health":15, "thirst":-15, "notes":"🥩 Thick cut steak. Very filling."},
+    "stuffed_thin_meat": {"energy":15, "hunger":70, "health":20, "thirst":-10, "notes":"🍄 Stuffed meat with mushrooms."},
+    "stuffed_thin_meat_berries": {"energy":20, "hunger":75, "health":15, "thirst":0, "notes":"🍓 Meat stuffed with berries."},
+    "stuffed_thin_meat_honey":   {"energy":25, "hunger":80, "health":20, "thirst":0, "notes":"🍯 Sweet honey-glazed meat."},
+    "stuffed_thin_meat_meat":    {"energy":20, "hunger":85, "health":25, "thirst":-5, "notes":"🥩 Extra-meaty stuffed roast."},
     "moss_salve":        {"energy":0,  "hunger":5,  "health":25, "thirst":0,  "notes":"🌿 Natural healing paste."},
     "antidote_tea":      {"energy":15, "hunger":10, "health":5,  "thirst":25, "notes":"🍵 Clears toxins & soothes hazard wounds."},
     "frost_tonic":       {"energy":20, "hunger":15, "health":0,  "thirst":15, "notes":"❄️ Warms the core. Great before Arctic travel."},
@@ -445,7 +451,7 @@ SHOP_CATEGORIES = {
 RECIPES = {
     "woodworking_station": {"mat": {"plank":5},                         "igm":120,"energy":15, "station": None,               "cat":"🪵 Woodworking"},
     "sewing_station":      {"mat": {"plank":8,"rock":2,"fabric":10},    "igm":90, "energy":15, "station":"woodworking_station", "cat":"🪵 Woodworking"},
-    "smelter":             {"mat": {"rock":15,"plank":10,"fibergrass":10},"igm":120,"energy":20,"station":"woodworking_station","cat":"🔥 Smelting"},
+    "smelter":             {"mat": {"rock":15,"plank":3,"fibergrass":10},"igm":120,"energy":20,"station":"woodworking_station","cat":"🔥 Smelting"},
     "axe":                 {"mat": {"wood":8,"plank":2},                "igm":60, "energy":5,  "station": None,               "cat":"🪵 Woodworking"},
     "advanced_axe":        {"mat": {"steel":2,"plank":3},               "igm":90, "energy":10, "station":"woodworking_station","cat":"🪵 Woodworking"},
     "pickaxe":             {"mat": {"wood":10,"plank":3},               "igm":90, "energy":10, "station":"woodworking_station","cat":"🪵 Woodworking"},
@@ -581,6 +587,8 @@ HELP_PAGES = {
     "1. 🎮 Basic Controls": """🎮 BASIC CONTROLS
 ⬆️⬇️⬅️➡️  Arrow keys      : Move 1 tile (costs 0.5⚡). BLOCKED while crafting!
 🚶 walk <name>     : Auto-pathfind to a named resource/cluster
+🗡️ attack / a      : Strike nearest animal within 2 tiles with equipped spear
+🗡️ throw / t       : Throw spear at nearest animal
 🪵 gather          : Collect resources at your current tile (-2⚡)
 🎒 inv             : View inventory (items & gear)
 🍽️ eat <item>      : Eat food    💧 drink <item>  : Drink water/liquids
@@ -927,6 +935,8 @@ class WeatherSystem:
         self.tornado_active = False
         self.tornado_type = "none"
         self.tornado_timer = 0
+        self.tornado_x = 0
+        self.tornado_y = 0
         self.rain_hours = 0
         self.last_lightning = 0
         self.lightning_hit = False   # flag for main loop to trigger red flash
@@ -1165,20 +1175,28 @@ class WeatherSystem:
                     if world.clusters: del world.clusters[list(world.clusters.keys())[-1]]
             if self.tornado_timer <= 0:
                 self.tornado_active = False; self.current = "🌦️ CLEARING"
-            base = f"🌪️ {t_data['name']} active at @({int(player.x)},{int(player.y)})! ({self.tornado_timer} mins left)"
+            tx = int(self.tornado_x)
+            ty = int(self.tornado_y)
+            base = f"🌪️ {t_data['name']} active at @({tx},{ty})! ({self.tornado_timer} mins left)"
             if hit and dmg > 0:
-                return f"🌪️ YOU WERE HIT BY A TORNADO at @({int(player.x)},{int(player.y)})! (-{int(dmg)} HP) {self.tornado_timer} mins left{animal_msg}"
+                return f"🌪️ YOU WERE HIT BY A TORNADO at @({tx},{ty})! (-{int(dmg)} HP) {self.tornado_timer} mins left{animal_msg}"
             return base + animal_msg
         roll = random.random(); spawn = "none"
         if self.intensity==4 and roll<0.05: spawn="huge"
         elif self.intensity>=2 and roll<0.35: spawn="medium"
         elif roll < 0.35: spawn="light"
         if spawn != "none":
+            self.tornado_x, self.tornado_y = 0, 0
+            t_data = TORNADO_TYPES[spawn]
+            angle = random.random() * math.tau
+            dist = random.uniform(0, max(50, t_data.get("radius", 50) * 1.5))
+            self.tornado_x = player.x + math.cos(angle) * dist
+            self.tornado_y = player.y + math.sin(angle) * dist
             self.tornado_active = True; self.tornado_type = spawn
             self.tornado_timer = TORNADO_TYPES[spawn]["duration_mins"]
             self.current = f"🌪️ TORNADO ({spawn.upper()})"
             self.tornado_hit = True
-            return f"⚠️ TORNADO WARNING: {TORNADO_TYPES[spawn]['name']} detected!"
+            return f"⚠️ TORNADO WARNING: {TORNADO_TYPES[spawn]['name']} detected at @({int(self.tornado_x)},{int(self.tornado_y)})!"
         return None
 
 # ==================== PLAYER ====================
@@ -1221,6 +1239,9 @@ class Player:
         # Spear
         self.spear_type = None
         self.spear_dur = 0
+        # Poison coating on spear: 1 application = 4 strikes OR 1 throw
+        self.spear_poison_strikes = 0  # remaining doubled-damage strikes
+        self.spear_poison_throw   = False  # next throw is doubled
         # Fire
         self.on_fire = False
         self.fire_start = 0.0
@@ -2331,8 +2352,11 @@ def main():
     save_path = None; biome = "Forest"
     try:
         save_path, biome, is_new = pick_save()
-        print("🚀 Preparing world..."); sys.stdout.flush()
         term = Terminal()
+        termios.tcflush(term.fd, termios.TCIFLUSH); term.setup()
+        if is_new:
+            run_tutorial(term)
+        print("🚀 Preparing world..."); sys.stdout.flush()
         player = Player()
         world = World(biome, "day")
         world.biome = biome
@@ -2368,9 +2392,7 @@ def main():
         print(f"\n❌ Setup failed: {e}"); return
 
     sys.stdout.flush()
-    termios.tcflush(term.fd, termios.TCIFLUSH); term.setup()
     if is_new:
-        run_tutorial(term)
         world.seed_initial_animals(player)
     player.last_passive = time.time()
     player.last_day = time.time()
@@ -2922,8 +2944,8 @@ def main():
                                                 if active_spear == "ice_spear": player.spear_dur = 0
                                                 msg.append(f"🗡️ Threw spear! -{dmg} dmg ({max(0,target['hp']):.0f} HP left)")
                                         else:
-                                            if dist > 3:
-                                                msg.append(f"❌ Too far to strike! ≤3 tiles needed (you're {dist:.1f} away).")
+                                            if dist > 2:
+                                                msg.append(f"❌ Too far to strike! ≤2 tiles needed (you're {dist:.1f} away).")
                                                 hit = False
                                             else:
                                                 dmg = sdef["strike"] * (2 if player.inventory.get("poison",0)>0 else 1)
@@ -3177,6 +3199,8 @@ def main():
 
                 # ---- WALK ----
                 elif act == "walk" and arg:
+                    if paused:
+                        msg.append("⏸️ Can't walk while paused. Resume first."); msg = msg[-3:]; continue
                     if player.active_tasks: msg.append("🔨 Cannot walk while crafting!"); continue
                     arg_clean = arg.strip().lower()
                     if arg_clean.startswith("to "):
@@ -3229,6 +3253,10 @@ def main():
                             if ik == "advanced_axe": player.axe_dur = TOOL_DUR_ADV
                             if ik == "pickaxe": player.pickaxe_dur = TOOL_DUR
                             if ik in player.station_hp: player.station_hp[ik] = STATION_MAX_HP
+                            # Auto-equip spears bought if no spear currently equipped
+                            if ik in SPEAR_DEFS and (not player.spear_type or player.spear_dur <= 0):
+                                player.spear_type = ik
+                                player.spear_dur = SPEAR_DEFS[ik]["dur"]
                             msg.append(f"✅ Bought {ik.replace('_',' ').title()} for {c}🪙")
                         else: msg.append(f"❌ Need {int(ITEM_PRICES[ik]*1.5)}🪙")
                     else:
@@ -3289,6 +3317,15 @@ def main():
                             player.inventory[player.wearing] = player.inventory.get(player.wearing,0)+1
                             player.wearing = None; msg.append("🛡️ Armor removed.")
                         else: msg.append("❌ No armor being worn.")
+                    # --- Equip spear ---
+                    elif target in SPEAR_DEFS:
+                        # equip a spear from inventory without removing it; set durability if not set
+                        if player.inventory.get(target,0) > 0:
+                            player.spear_type = target
+                            player.spear_dur = SPEAR_DEFS[target]["dur"]
+                            msg.append(f"🗡️ Equipped {target.replace('_',' ').title()}!")
+                        else:
+                            msg.append(f"❌ No {target.replace('_',' ')} in inventory.")
                     else:
                         equipped = False
                         msg.append("❌ Cannot equip that. Try: equip pants/medium_pants/heavy_pants, equip shirt/medium_shirt/heavy_shirt, equip light_armor, equip none_pants, equip none_shirt, equip none")
@@ -3391,6 +3428,110 @@ def main():
 
                     else:
                         msg.append("🪤 Usage: trap set | trap check | trap remove | trap list")
+
+                # ---- POISON SPEAR (apply 1 vial: lasts 4 strikes OR 1 throw) ----
+                elif act == "poison" and arg.strip() == "spear":
+                    if not player.spear_type or player.spear_dur <= 0:
+                        msg.append("❌ No spear equipped to poison.")
+                    elif player.inventory.get("poison", 0) <= 0:
+                        msg.append("❌ No poison vial in inventory. Craft poison first.")
+                    elif player.spear_poison_strikes > 0 or player.spear_poison_throw:
+                        msg.append("☠️ Spear is already poisoned.")
+                    else:
+                        player.inventory["poison"] -= 1
+                        player.spear_poison_strikes = 4
+                        player.spear_poison_throw   = True
+                        msg.append("☠️ Poison applied! Doubles damage for 4 strikes OR 1 throw.")
+
+                # ---- ATTACK (a/s): auto-target nearest, range 2, 10%/tile miss ----
+                elif act in ("a", "attack", "s"):
+                    if not player.spear_type or player.spear_dur <= 0 or player.inventory.get(player.spear_type,0) <= 0:
+                        msg.append("❌ No spear equipped. Craft a spear first.")
+                    else:
+                        sdef = SPEAR_DEFS[player.spear_type]
+                        nearby = [(a, math.hypot(a["x"]-player.x, a["y"]-player.y)) for a in world.animals]
+                        nearby = [(a,d) for (a,d) in nearby if d <= 2.0]
+                        if not nearby:
+                            msg.append("❌ No animal within 2 tiles to attack.")
+                        else:
+                            nearby.sort(key=lambda z: z[1])
+                            target, dist = nearby[0]
+                            tname = target["type"].replace("_"," ").title()
+                            miss_chance = min(0.95, max(0.0, math.ceil(dist) * 0.10))
+                            if random.random() < miss_chance:
+                                msg.append(f"💨 Strike at {tname} ({dist:.1f}t) — MISSED! ({int(miss_chance*100)}% miss)")
+                            else:
+                                mult = 2 if player.spear_poison_strikes > 0 else 1
+                                dmg = sdef["strike"] * mult
+                                target["hp"] -= dmg
+                                player.spear_dur -= dmg
+                                pmark = " ☠️" if mult == 2 else ""
+                                if player.spear_poison_strikes > 0:
+                                    player.spear_poison_strikes -= 1
+                                    if player.spear_poison_strikes == 0: player.spear_poison_throw = False
+                                msg.append(f"⚔️ Strike{pmark} {tname}! -{dmg} HP ({max(0,target['hp']):.0f} left)")
+                                if player.spear_dur <= 0:
+                                    broke = player.spear_type
+                                    player.inventory[broke] = max(0, player.inventory.get(broke,0)-1)
+                                    player.spear_type = None; player.spear_dur = 0
+                                    player.spear_poison_strikes = 0; player.spear_poison_throw = False
+                                    msg.append(f"💥 {broke.replace('_',' ').title()} broke!")
+                                if target["hp"] <= 0:
+                                    adef = ANIMAL_DEFS.get(target["type"], {})
+                                    loot = adef.get("loot", {})
+                                    for it,q in loot.items(): player.inventory[it] = player.inventory.get(it,0)+q
+                                    try: world.animals.remove(target)
+                                    except ValueError: pass
+                                    loot_str = ", ".join(f"{q}x {k}" for k,q in loot.items()) or "no loot"
+                                    msg.append(f"💀 {tname} killed! +{loot_str}")
+                                    player.total_hunts += 1
+
+                # ---- THROW (t): auto-target nearest, 10%/tile miss (15% for ice_spear) ----
+                elif act in ("t", "throw"):
+                    if not player.spear_type or player.spear_dur <= 0 or player.inventory.get(player.spear_type,0) <= 0:
+                        msg.append("❌ No spear equipped. Craft a spear first.")
+                    else:
+                        sdef = SPEAR_DEFS[player.spear_type]
+                        nearby = [(a, math.hypot(a["x"]-player.x, a["y"]-player.y)) for a in world.animals]
+                        if not nearby:
+                            msg.append("❌ No animal in sight to throw at.")
+                        else:
+                            nearby.sort(key=lambda z: z[1])
+                            target, dist = nearby[0]
+                            tname = target["type"].replace("_"," ").title()
+                            miss_chance = min(0.95, max(0.0, math.ceil(dist) * sdef["miss_pct"]))
+                            throw_cost = min(sdef["throw_cost"], player.spear_dur)
+                            spear_name = player.spear_type
+                            if random.random() < miss_chance:
+                                player.spear_dur -= throw_cost
+                                if spear_name == "ice_spear": player.spear_dur = 0
+                                msg.append(f"💨 Threw spear at {tname} ({dist:.1f}t) — MISSED! ({int(miss_chance*100)}% miss)")
+                            else:
+                                mult = 2 if player.spear_poison_throw else 1
+                                dmg = sdef["throw"] * mult
+                                target["hp"] -= dmg
+                                player.spear_dur -= throw_cost
+                                if spear_name == "ice_spear": player.spear_dur = 0
+                                pmark = " ☠️" if mult == 2 else ""
+                                msg.append(f"🗡️ Threw spear{pmark}! {tname} -{dmg} HP ({max(0,target['hp']):.0f} left)")
+                            # Poison throw consumed regardless of hit/miss
+                            if player.spear_poison_throw:
+                                player.spear_poison_throw = False
+                                player.spear_poison_strikes = 0
+                            if player.spear_dur <= 0:
+                                player.inventory[spear_name] = max(0, player.inventory.get(spear_name,0)-1)
+                                player.spear_type = None; player.spear_dur = 0
+                                player.spear_poison_strikes = 0; player.spear_poison_throw = False
+                                msg.append(f"💥 {spear_name.replace('_',' ').title()} broke!")
+                            if target["hp"] <= 0:
+                                adef = ANIMAL_DEFS.get(target["type"], {})
+                                loot = adef.get("loot", {})
+                                for it,q in loot.items(): player.inventory[it] = player.inventory.get(it,0)+q
+                                try: world.animals.remove(target)
+                                except ValueError: pass
+                                loot_str = ", ".join(f"{q}x {k}" for k,q in loot.items()) or "no loot"
+                                msg.append(f"💀 {tname} killed! +{loot_str}")
+                                player.total_hunts += 1
 
                 elif cmd == "save":
                     try:

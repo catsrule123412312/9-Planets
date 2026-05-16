@@ -1,0 +1,5 @@
+{
+  "terminal.integrated.wordWrap": "off",
+  "terminal.integrated.gpuAcceleration": "on",
+  "terminal.integrated.localEchoLatencyThreshold": -1
+}

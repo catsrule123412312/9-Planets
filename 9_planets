@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-🪐 9 Planets — Flagship Edition v16.0
-CHANGES: unfiltered water -5HP, inspect pre-checks, unknown spider material,
-         water_filter recipe display fix, poisonous_berry, flood mechanic,
-         water evaporation, pickaxe HUD, energy floor display, overpopulation,
-         gather locked while crafting, axe-break message, station durability display,
-         roasted berry accepts any berry, glowing berry rebalance, recipe column fix,
-         advanced axe, red flash on damage events, tornado hit message.
+🪐 9 Planets — Flagship Edition v17.0
+CHANGES v17: quest display active-only, plank quest checks inventory, first-night fix,
+         grot spawn fix, coffee +30 energy, remove butchering, axe icon fix,
+         grot name fix, filtered-water from dirty-water, fatigue=0 blocks actions,
+         campfire temp cap, trap durability 4-5 uses, stat warnings, cancel hints,
+         bandage command, typo suggestions, inventory pagination, XP/day=50,
+         red flash on starvation/thirst damage, spider silk damage, herbal tea fix,
+         no fibergrass/forest-animals in Arctic, ice vein gives ice_chunk,
+         station display show all, tools durability in inventory.
 """
 
-import time, random, math, json, os, sys, tty, termios, select, signal, unicodedata
+import time, random, math, json, os, sys, select, signal, unicodedata
+try:
+    import tty, termios
+    HAVE_TERMIOS = True
+except ImportError:
+    HAVE_TERMIOS = False
+    import msvcrt
 
 # === SSH/ALSA AUDIO FIX — MUST BE BEFORE import pygame ===
 import os
@@ -265,7 +273,7 @@ class SoundManager:
 HUNGER_TRAVEL_RATE = 1.0 / 30.0; THIRST_TRAVEL_RATE = HUNGER_TRAVEL_RATE * 2.0
 PASSIVE_ENERGY_RATE = HUNGER_IDLE_RATE * 0.5
 DAY_LENGTH = 720
-TERM_WIDTH = 80
+TERM_WIDTH = 80  # default; will be updated dynamically
 MAX_STAT_CAP = 100
 STATION_MAX_HP = 500.0
 TRAP_RANGE_VISIBLE = 30; TRAP_RANGE_SAFE = 15; TRAP_CATCH_TIME = 60.0; TRAP_MEAT = 10
@@ -328,7 +336,7 @@ ANIMAL_DEFS = {
     "salmon":       {"biome":"Arctic","hp":5,  "speed_cpm":20,"vision_peak":3,"vision_max":6,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐟","spawn_rate":0.02},
     "seal":         {"biome":"Arctic","hp":10, "speed_cpm":25,"vision_peak":5,"vision_max":10, "group":(2,4),  "loot":{"meat":6,"bone":3},"icon":"🦭","spawn_rate":0.01},
     "penguin":      {"biome":"Arctic","hp":10, "speed_cpm":8, "vision_peak":5,"vision_max":10, "group":(50,50),"loot":{"meat":6,"bone":3},"icon":"🐧","spawn_rate":0.02,"panic":True},
-    "grot":         {"biome":["Forest","Arctic"],"hp":5,  "speed_cpm":15,"vision_peak":5,"vision_max":5,  "group":(1,1),  "icon":"🐾 👹 grot","spawn_rate":0.00},
+    "grot":         {"biome":["Forest","Arctic"],"hp":5,  "speed_cpm":15,"vision_peak":5,"vision_max":5,  "group":(1,1),  "icon":"🐾 👹","spawn_rate":0.00},
     
 }
 
@@ -421,14 +429,32 @@ QUESTS = {
         "pts": 0,
         "coins": 0,
     },
+    "fight_old_man": {
+        "name": "Quest 5b",
+        "desc": "You think you can match me? Har! Then fight me! (Type: fight old_man)",
+        "pts": 500,
+        "coins": 250,
+    },
+    "berry_gathering": {
+        "name": "Quest 6a",
+        "desc": "Berries are essential food! Gather 20 non-poisonous, non-glowing berries.",
+        "pts": 20,
+        "coins": 15,
+    },
     "berry_collection": {
-        "name": "Quest 6",
+        "name": "Quest 6b",
         "desc": "Hi! I see you’ve tried a berry. Collect me all of the berry types and you’ll get a reward!",
         "pts": 30,
         "coins": 20,
     },
+    "mushroom_gathering": {
+        "name": "Quest 7a",
+        "desc": "Mushrooms grow in abundance! Gather 20 common mushrooms or black trumpets.",
+        "pts": 20,
+        "coins": 15,
+    },
     "mushroom_collection": {
-        "name": "Quest 7",
+        "name": "Quest 7b",
         "desc": "Hi! I see you’ve tried a mushroom. Collect all of the mushroom types… including the most poisonous of them all… and you’ll get a reward!",
         "pts": 50,
         "coins": 30,
@@ -691,7 +717,7 @@ def check_achievement_cond(aid, player, current_playtime=None):
     return False
 
 
-def show_quest_screen(term, player, preface=None):
+def show_quest_screen(term, player, preface=None, status_filter=None):
     if term is None:
         return
     lines = ["📝 OLD MAN QUEST LOG", "─" * TERM_WIDTH, ""]
@@ -699,11 +725,26 @@ def show_quest_screen(term, player, preface=None):
         for l in vwrap(preface, TERM_WIDTH):
             lines.append(l)
         lines.append("")
-    visible = [qid for qid in QUESTS if player.quests.get(qid) in ("active", "completed")]
+    if status_filter in ("active", "completed"):
+        visible = [qid for qid in reversed(list(QUESTS.keys())) if player.quests.get(qid) == status_filter]
+    else:
+        visible = [qid for qid in reversed(list(QUESTS.keys())) if player.quests.get(qid) in ("active", "completed")]
     if not visible:
-        lines.append("🧓 The old man has not given you any quests yet.")
+        if status_filter == "active":
+            lines.append("🧓 You have no active quests at the moment.")
+        elif status_filter == "completed":
+            lines.append("🧓 You haven't completed any quests yet.")
+        else:
+            lines.append("🧓 The old man has not given you any quests yet.")
         lines.append("")
     else:
+        if status_filter == "active":
+            lines.append("🟡 ACTIVE QUESTS")
+        elif status_filter == "completed":
+            lines.append("✅ COMPLETED QUESTS")
+        else:
+            lines.append("🟡 ACTIVE & ✅ COMPLETED QUESTS")
+        lines.append("")
         for qid in visible:
             q = QUESTS[qid]
             status = player.quests.get(qid, "pending")
@@ -734,6 +775,8 @@ def update_quests(player, weather, world, msg, term=None):
 
     ensure("berries_gathered", 0)
     ensure("mushrooms_gathered", 0)
+    ensure("frostberry_warm_since", 0.0)
+    ensure("freezing_water_warm_since", 0.0)
     ensure("used_campfire", False)
     ensure("berry_types_eaten", [])
     ensure("mushroom_types_eaten", [])
@@ -771,31 +814,57 @@ def update_quests(player, weather, world, msg, term=None):
     ensure("arctic_items_brought", 0)
 
     def activate(qid, text):
-        if player.mode != "quest":
+        if player.mode not in ("quest", "combat"):
             return
         if player.quests.get(qid) == "pending":
             player.quests[qid] = "active"
             player.quest_announced[qid] = True
+            # Show new quests in a dedicated full-screen prompt
             if term is not None:
-                show_quest_screen(term, player, preface=text)
-            else:
-                msg.append(text)
+                term.print_page(["📝 NEW QUEST", "─" * TERM_WIDTH, "", text, "", "Press Enter to continue."])
+            msg.append(text)
+            msg.append("🧓 Old Man: Type 'quests' to view details.")
 
     def complete(qid, text, reward=None):
         if player.quests.get(qid) != "completed":
             player.quests[qid] = "completed"
             player.points += QUESTS[qid]["pts"]
             player.coins += QUESTS[qid]["coins"]
-            msg.append(text)
             player.quest_announced[qid] = True
+            reward_text = None
             if reward == "health_potion":
                 player.inventory["health_potion"] = player.inventory.get("health_potion", 0) + 1
-                msg.append("✅ Received a Health Potion for your reward.")
+                reward_text = "✅ Received a Health Potion for your reward."
             if reward == "hp_tonic":
                 player.inventory["health_potion"] = player.inventory.get("health_potion", 0) + 1
-                msg.append("✅ Received a Health Potion for your reward.")
+                reward_text = "✅ Received a Health Potion for your reward."
+            # Build popup content
+            popup = ["✅ QUEST COMPLETE", "─" * TERM_WIDTH, ""]
+            popup.append(f"Quest: {QUESTS[qid]['name']}")
+            popup.append("")
+            popup.append(f"Completed: {text.split(':')[1].strip() if ':' in text else 'Quest objective achieved!'}")
+            popup.append("")
+            popup.append("Rewards:")
+            if QUESTS[qid]["pts"] > 0:
+                popup.append(f"  🏆 {QUESTS[qid]['pts']} points")
+            if QUESTS[qid]["coins"] > 0:
+                popup.append(f"  🪙 {QUESTS[qid]['coins']} coins")
+            if reward_text:
+                popup.append(f"  {reward_text}")
+            popup.append("")
+            popup.append("Press Enter to continue.")
+            # Show popup
+            if term is not None:
+                term.print_page(popup)
+            # Announce completion in the message log
+            msg.append(text)
+            msg.append("🧓 Old Man: Well done. I have more for you soon.")
+            if reward_text:
+                msg.append(reward_text)
+            msg.append("🧓 Old Man: Type 'quests' to open the quest log.")
 
-    if player.mode != "quest":
+
+    if player.mode not in ("quest", "combat"):
         return
 
     active_any = any(status == "active" for status in player.quests.values())
@@ -803,7 +872,7 @@ def update_quests(player, weather, world, msg, term=None):
         activate("first_night", "🧓 Old Man: Hi, explorer! Tryin’ to survive a night here in the forest, eh? I dare you to survive!")
 
     if player.quests.get("first_night") == "active":
-        if player.days_survived >= 1 and player.wood_gathered >= 5 and player.used_campfire:
+        if player.days_survived >= 1 and player.wood_gathered >= 5:
             complete("first_night", "✅ QUEST COMPLETE: First Night survived! The old man rewards you with 10 points and 10 coins.")
 
     if player.quests.get("beginners_luck") == "pending" and player.quests.get("first_night") == "completed" and current_playtime >= 60:
@@ -828,11 +897,32 @@ def update_quests(player, weather, world, msg, term=None):
         activate("survivor_reward", "🧓 Old Man: Har har har! You really are an experienced explorer! Har har har! You might even be a match for me surviving!")
         complete("survivor_reward", "✅ QUEST COMPLETE: Reward delivered.", reward="hp_tonic")
 
+    if player.quests.get("fight_old_man") == "pending" and player.quests.get("survivor_reward") == "completed":
+        activate("fight_old_man", "🧓 Old Man: You think you can match me? Har! Then fight me! Type 'fight old_man' to begin!")
+
+    # New quest: gather 20 non-poisonous, non-glowing berries
+    SAFE_BERRIES_Q = {"wild_berries", "sweet_berries", "sour_berries", "frostberry"}
+    if player.quests.get("berry_gathering") == "pending" and player.quests.get("first_night") == "completed" and player.berries_gathered >= 1:
+        activate("berry_gathering", "🧓 Old Man: Been collecting berries? Gather 20 safe berries — wild, sweet, or sour. Poisonous and glowing don't count!")
+    if player.quests.get("berry_gathering") == "active":
+        safe_count = sum(player.inventory.get(b, 0) for b in SAFE_BERRIES_Q)
+        if safe_count >= 20:
+            complete("berry_gathering", "✅ QUEST COMPLETE: 20 safe berries gathered! 20 points and 15 coins.")
+
     if player.quests.get("berry_collection") == "pending" and player.berry_types_eaten and player.quests.get("first_night") == "completed":
         activate("berry_collection", "🧓 Old Man: I see you’ve tried a berry. Collect me all of the berry types and you’ll get a reward!")
 
     if player.quests.get("berry_collection") == "active" and all(player.inventory.get(b, 0) > 0 for b in BERRY_ITEMS):
         complete("berry_collection", "✅ QUEST COMPLETE: Berry collection finished! 30 points and 20 coins.")
+
+    # New quest: gather 20 non-death_cap, non-spotted mushrooms
+    SAFE_SHROOMS_Q = {"mushrooms", "black_trumpets"}
+    if player.quests.get("mushroom_gathering") == "pending" and player.quests.get("first_night") == "completed" and player.mushrooms_gathered >= 1:
+        activate("mushroom_gathering", "🧓 Old Man: Mushrooms grow everywhere! Gather 20 common mushrooms or black trumpets. The spotted and mystery ones don't count!")
+    if player.quests.get("mushroom_gathering") == "active":
+        safe_shroom_count = sum(player.inventory.get(m, 0) for m in SAFE_SHROOMS_Q)
+        if safe_shroom_count >= 20:
+            complete("mushroom_gathering", "✅ QUEST COMPLETE: 20 safe mushrooms gathered! 20 points and 15 coins.")
 
     if player.quests.get("mushroom_collection") == "pending" and player.mushroom_types_eaten and player.quests.get("first_night") == "completed":
         activate("mushroom_collection", "🧓 Old Man: I see you’ve tried a mushroom. Collect all of the mushroom types… including the most poisonous of them all… and you’ll get a reward!")
@@ -853,8 +943,15 @@ def update_quests(player, weather, world, msg, term=None):
     if player.quests.get("wood_supply") == "pending" and player.quests.get("lumberjack_apprentice") == "completed":
         activate("wood_supply", "🧓 Old Man: Heh heh heh… an experienced lumberjack, eh? You see, back when I was a youngling like you, I could get all the wood I wanted. But my old bones… well, you see… typing ‘gather’ isn’t as easy as it used to be. And my wood supply is running out. If you would supply me with 100 wood that you gathered in the forest, I could offer you a supreme prize!")
 
-    if player.quests.get("wood_supply") == "active" and player.wood_gathered >= 100:
-        complete("wood_supply", "✅ QUEST COMPLETE: Wood supply delivered! 50 points and 200 coins.")
+    # wood_supply quest: need to sell 100 wood to old man (via sell command while quest active)
+    if player.quests.get("wood_supply") == "active" and player.inventory.get("wood", 0) >= 100:
+        # Old man approaches and asks to buy the wood
+        if not getattr(player, '_wood_supply_offered', False):
+            player._wood_supply_offered = True
+            # Auto-sell/deliver the wood
+            player.inventory["wood"] = player.inventory.get("wood", 0) - 100
+            player.coins += 150  # bonus payment
+            complete("wood_supply", "✅ QUEST COMPLETE: Old Man bought 100 wood for 150 coins! 50 points.")
 
     if player.quests.get("bee_hive_research") == "pending" and player.quests.get("beginners_luck") == "completed":
         if player.quest11_ready_at is None:
@@ -930,7 +1027,7 @@ def update_quests(player, weather, world, msg, term=None):
     if player.quests.get("plank_safety") == "pending" and player.quests.get("spear_hunter") == "completed" and current_playtime >= player.quest22_ready_at:
         activate("plank_safety", "🧓 Old Man: Now that you have all of this equipment, I suggest you maintain it. Make 7 planks. It will be tedious, but you’ll thank me in the long run. 7 planks is enough to make both a woodworking station and an axe, in case one of them breaks. Whenever you build something new, don’t use these planks. Instead, treat them as “emergency” planks.")
 
-    if player.quests.get("plank_safety") == "active" and player.planks_made >= 7:
+    if player.quests.get("plank_safety") == "active" and player.inventory.get("plank", 0) >= 7:
         complete("plank_safety", "✅ QUEST COMPLETE: Emergency planks ready! 40 points and 25 coins.")
         if player.quest23_ready_at is None:
             player.quest23_ready_at = current_playtime + (GAME_HOUR * 2)
@@ -1079,7 +1176,7 @@ def update_quests(player, weather, world, msg, term=None):
 
 def _temp_label(temp):
     """Return a short temperature label for the HUD."""
-    if temp <= 10:   return "🥶❄️ Freezing"
+    if temp < 10:    return "🥶❄️ Freezing"
     if temp <= 30:   return f"❄️ Cold ({temp:.0f})"
     if temp <= 65:   return f"😊 Comfy"
     if temp <= 80:   return f"🌡️ Warm ({temp:.0f})"
@@ -1117,7 +1214,7 @@ GAME_MECHANICS = {
     "thirst":       "💧 Thirst drains over time. At 0: continuous damage. Drink water to restore.",
     "energy":       "⚡ Energy fuels actions. Does NOT passively regenerate! Eat food or rest to recover.",
     "health":       "❤️ Your life. Hits 0 = Game Over. Damage from hazards, starvation, dehydration.",
-    "armor":        "🛡️ Light (500 dur, 20% dmg reduction), Medium (1000 dur, 40% dmg reduction), Heavy (1800 dur, 70% dmg reduction, -30% speed).",
+    "armor":        "🛡️ ARMOR TYPES:\n  🟢 Light Armor     | 500 dur  | 20% dmg reduction\n     Hazard immunity: -5 from spider silk, -10 from poisonous spider, -5 from bee hives\n  🟡 Medium Armor    | 1000 dur | 40% dmg reduction\n     Hazard immunity: -0 from spider silk (full block!), -15 from poisonous spider, -10 from bee hives\n  🔴 Heavy Armor     | 1800 dur | 70% dmg reduction, -30% move speed\n     Hazard immunity: Spider damage → 0 (full immunity!), -20 from bee hives\n  Percentage reduction applies to: monster attacks, weather, firestorms.",
     "light rain":   "🌦️ +15 water/patch, -10% clusters. Lasts 1-3 hours.",
     "medium storm": "⛈️ +25 water/patch, -15% clusters. Spawns Lightning.",
     "heavy storm":  "🌩️ +40 water/patch, -30% clusters. Lightning & Tornadoes.",
@@ -1206,6 +1303,8 @@ DISPLAY_ITEM_NAME_MAP = {
     **{item["id"]: item["name"] for item in MUSHROOM_TYPES},
     **{item["id"]: item["name"] for item in MOSS_TYPES},
     "grot_tooth": "🐾 👹 Grot Tooth",
+    "advanced_axe": "🪓⚡ Advanced Axe",
+    "axe": "🪓 Axe",
 }
 
 def display_item_name(item):
@@ -1254,6 +1353,7 @@ food_effects = {
     "thin_cut_meat":     {"energy": 0,  "hunger": 0,  "health": 0,   "thirst": 0},
     "bandages":          {"energy": 0,  "hunger": 0,  "health": 20,  "thirst": 0},
     "enhanced_bandage":  {"energy": 0,  "hunger": 0,  "health": 30,  "thirst": 0},
+    "meat":              {"energy": 0,  "hunger": 5,  "health": -5,  "thirst": 0,   "notes": "🥩 Raw meat. Cook it first for best results!"},
     "raw_game":          {"energy": 0,  "hunger": 5,  "health": -5,  "thirst": 0,   "notes": "🥩 Raw meat. Cook first!"},
     "ironroot":          {"energy": 5,  "hunger": 10, "health": 0,   "thirst": 0,   "notes": "🌱 Tough but edible."},
     "dirty_water":       {"energy": 5,  "hunger": 0,  "health": -5, "thirst": 35, "notes": "💧 Dirty water. -5 HP!"},
@@ -1261,7 +1361,14 @@ food_effects = {
     "water":             {"energy": 5,  "hunger": 0,  "health": -5, "thirst": 35,  "notes": "💧 Unfiltered water. -5 HP! Drink filtered_water when possible."},
     "filtered_water":    {"energy": 5,  "hunger": 0,  "health": 5,   "thirst": 40,  "notes": "💧 Clean filtered water."},
     "night_bug":         {"energy": 10, "hunger": 8,  "health": 0,   "thirst": -3,  "notes": "🐛 Crunchy. Surprisingly filling."},
-    "coffee":            {"energy": 0,  "hunger": 0,  "health": 0,   "thirst": 5,   "fatigue": 25, "notes": "☕ +25 Fatigue!"},
+    "coffee":            {"energy": 30, "hunger": 0,  "health": 0,   "thirst": 5,   "fatigue": 25, "notes": "☕ +30⚡ +25 Fatigue!"},
+    "herbal_tea":        {"energy": 10, "hunger": 5,  "health": 5,   "thirst": 20,  "fatigue": 10, "notes": "🍵 Soothing tea. Restores thirst & a little health."},
+    "chunky_stew":          {"energy": 25, "hunger": 80, "health": 15,  "thirst": 30,  "notes": "🍲 Hearty stew. Very filling and hydrating."},
+    "health_potion":         {"energy": 30, "hunger": 0,  "health": 50,  "thirst": -10, "notes": "💊 Powerful healing potion. +50 HP!"},
+    "arctic_water":          {"energy": 5,  "hunger": 0,  "health": -3,  "thirst": 30,  "notes": "❄️ Cold arctic water. Filter for safety."},
+    "snow":                  {"energy": 0,  "hunger": 0,  "health": -5,  "thirst": 15,  "notes": "❄️ Eating snow drops your temp! -5 HP."},
+    "ice_chunk":             {"energy": 0,  "hunger": 0,  "health": -10, "thirst": 20,  "notes": "🧊 Very cold. Do not eat! -10 HP."},
+    "coffee_beans":          {"energy": 5,  "hunger": 0,  "health": 0,   "thirst": -5,  "notes": "☕ Raw beans. Bitter but gives a small energy boost."},
     "freezing_water":       {"energy":0,"hunger":0,"health":-5, "thirst":30,"notes":"❄️ Freezing cold! -5 HP. Cook in furnace first."},
     "freezing_dirty_water": {"energy":0,"hunger":0,"health":-10,"thirst":20,"notes":"❄️ Dirty & freezing! -10 HP. Cook in furnace first."},
 }
@@ -1286,10 +1393,9 @@ BIOME_RESOURCES = {
         "🧊 Ice Chunk":         {"item": "ice_chunk",        "type": "material",   "locked": True, "tool_req": "pickaxe", "regrows": False, "hazard_key": None},
         "🫐 Frozen Berries":    {"item": "frostberry",       "type": "food",       "regrows": True,  "hazard_key": None},
         "✨ Shimmering Berries":{"item": "shimmer_frostberry","type": "food_risky", "regrows": True,  "hazard_key": None},
-        "⛏️ Ice Vein":          {"item": "steel",            "type": "material",   "regrows": False, "hazard_key": None},
+        "⛏️ Ice Vein":          {"item": "ice_chunk",        "type": "material",   "locked": True, "tool_req": "pickaxe", "regrows": False, "hazard_key": None},
         "🪨 Granite Outcrop":   {"item": "rock",             "type": "material",   "locked": True, "tool_req": "pickaxe", "regrows": False, "hazard_key": None},
         "🌿 Moss Patch":        {"item": "moss_harmful",     "type": "material",   "regrows": True,  "hazard_key": None},
-        "🌾 Fibergrass Patch":  {"item": "fibergrass",       "type": "material",   "regrows": True,  "hazard_key": None},
     }
 }
 
@@ -1299,9 +1405,9 @@ NIGHT_RESOURCES = {
 }
 
 HAZARDS = {
-    "bee hive":       {"dmg": 0, "chance": 0.80, "detour": 10.0},
-    "venomous spider":{"dmg": 0, "chance": 0.65, "detour": 13.0},
-    "spider nest":    {"dmg": 0, "chance": 0.25, "detour": 9.0}
+    "bee hive":       {"dmg": 15, "chance": 0.80, "detour": 4.0},
+    "venomous spider":{"dmg": 10, "chance": 0.65, "detour": 3.0},
+    "spider nest":    {"dmg": 8,  "chance": 0.25, "detour": 3.0}
 }
 
 ITEM_PRICES = {
@@ -1382,18 +1488,19 @@ RECIPES = {
     "cooked_berry":        {"mat": {"glowing_berries":2},               "igm":30, "energy":8,  "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
     "roasted_spotted_mushroom":{"mat":{"spotted_mushrooms":2},          "igm":30, "energy":8,  "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
     "cooked_shimmer_frostberry":{"mat":{"shimmer_frostberry":2},        "igm":30, "energy":8,  "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
+    "thawed_frostberry":       {"mat":{"frostberry":10},                       "igm":20, "energy":5,  "station":"furnace","fuel":1,  "cat":"🍳 Furnace","yield":{"wild_berries":10}},
     "roasted_meat":        {"mat": {"meat":1},                          "igm":30, "energy":15, "station":"furnace","fuel":4,  "cat":"🍳 Furnace"},
-    "herbal_tea":          {"mat": {"fresh_water":5,"ironroot":1},            "igm":40, "energy":5,  "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
+    "herbal_tea":          {"mat": {"fresh_water":5,"ironroot":1},            "igm":20, "energy":5,  "station":["furnace","liquifier"],"fuel":2,  "cat":"🍳 Furnace"},
     "jerky":               {"mat": {"meat":1, "ash":1},                "igm":40, "energy":8,  "station":"furnace", "cat":"🍳 Furnace"},
     "moss_salve":          {"mat": {"moss_healing":2, "beeswax":1},    "igm":30, "energy":5,  "station":"furnace", "cat":"🍳 Furnace"},
-    "antidote_tea":        {"mat": {"ironroot":1, "venom_sac":1, "fresh_water":5}, "igm":45, "energy":8,  "station":"furnace", "fuel":1, "cat":"🍳 Furnace"},
-    "frost_tonic":         {"mat": {"frostberry":2, "ice_chunk":1, "fresh_water":3}, "igm":35, "energy":6,  "station":"furnace", "cat":"🍳 Furnace"},
-    "glowing_jam":         {"mat": {"glowing_berries":2, "honey":1},    "igm":25, "energy":5,  "station":"furnace", "cat":"🍳 Furnace"},
-    "honey_root_tea":      {"mat": {"ironroot":1, "honey":1, "fresh_water":3}, "igm":30, "energy":5,  "station":"furnace", "fuel":1, "cat":"🍳 Furnace"},
+    "antidote_tea":        {"mat": {"ironroot":1, "venom_sac":1, "fresh_water":5}, "igm":22, "energy":8,  "station":["furnace","liquifier"], "fuel":1, "cat":"🍳 Furnace"},
+    "frost_tonic":         {"mat": {"frostberry":2, "ice_chunk":1, "fresh_water":3}, "igm":17, "energy":6,  "station":["furnace","liquifier"], "cat":"🍳 Furnace"},
+    "glowing_jam":         {"mat": {"glowing_berries":2, "honey":1},    "igm":12, "energy":5,  "station":["furnace","liquifier"], "cat":"🍳 Furnace"},
+    "honey_root_tea":      {"mat": {"ironroot":1, "honey":1, "fresh_water":3}, "igm":15, "energy":5,  "station":["furnace","liquifier"], "fuel":1, "cat":"🍳 Furnace"},
     "compressed_fuel":     {"mat": {"wood":20, "fibergrass":5}, "igm":60, "energy":10, "station":"woodworking_station", "cat":"🪵 Woodworking", "yield":{"fire_fuel":2}},
     "insulated_wrap":      {"mat": {"fabric":3, "spider_silk":5, "beeswax":1}, "igm":45, "energy":8, "station":"sewing_station", "cat":"🧵 Sewing"},
     "ash_poultice":        {"mat": {"ash":2, "fresh_water":2},               "igm":15, "energy":3,  "station":"woodworking_station", "cat":"🪵 Woodworking"},
-    "chunky_stew":         {"mat": {"meat":1,"fresh_water":10},               "igm":90, "energy":12, "station":"furnace","fuel":3,  "cat":"🍳 Furnace"},
+    "chunky_stew":         {"mat": {"meat":1,"fresh_water":10},               "igm":45, "energy":12, "station":["furnace","liquifier"],"fuel":3,  "cat":"🍳 Furnace"},
     "stuffed_thin_meat":   {"mat": {"thin_cut_meat":1,"mushrooms":2},   "igm":60, "energy":10, "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
     "thick_cut_meat":      {"mat": {"meat":5},                          "igm":180,"energy":25, "station":"furnace","fuel":6,  "cat":"🍳 Furnace"},
     "stuffed_mushroom":    {"mat": {"mushrooms":2},                     "igm":30, "energy":5,  "station":"furnace",           "cat":"🍳 Furnace"},
@@ -1401,18 +1508,17 @@ RECIPES = {
     "stuffed_thin_meat_honey":  {"mat":{"thin_cut_meat":1,"honey":1},   "igm":60, "energy":15, "station":"furnace","fuel":2,  "cat":"🍳 Furnace"},
     "stuffed_thin_meat_meat":   {"mat":{"thin_cut_meat":1,"meat":2},    "igm":50, "energy":12, "station":"furnace","fuel":1,  "cat":"🍳 Furnace"},
     "fire_fuel":           {"mat": {"oil":1,"wood":50},                 "igm":60, "energy":10, "station":"woodworking_station","cat":"🪵 Woodworking"},
-    "coffee":              {"mat": {"coffee_beans":1,"water":1},        "igm":30, "energy":5,  "station":"furnace","fuel":1,   "cat":"🍳 Furnace"},
+    "coffee":              {"mat": {"coffee_beans":1,"fresh_water":1},   "igm":15, "energy":5,  "station":["furnace","liquifier"],"fuel":1,   "cat":"🍳 Furnace"},
     "poison":              {"mat": {"venom_sac":2},                     "igm":30, "energy":5,  "station":"woodworking_station","cat":"⚙️ General"},
-    "butchering":          {"mat": {"raw_game":2},                      "igm":40, "energy":5,  "station":"woodworking_station","yield":{"bone":1,"meat":2},"cat":"🪵 Woodworking"},
     "medium_armor":        {"mat": {"plastic":5,"fibergrass":15,"steel":1},"igm":200,"energy":30,"station":["woodworking_station","sewing_station"],"wear":{"woodworking_station":120,"sewing_station":60},"cat":"🛡️ Armor"},
     "heavy_armor":         {"mat": {"necroplastic":3,"fibergrass":30,"steel":10},"igm":400,"energy":50,"station":["woodworking_station","sewing_station"],"wear":{"woodworking_station":250,"sewing_station":150},"cat":"🛡️ Armor"},
     "spear":              {"mat": {"plank":2,"rock":15},      "igm":60, "energy":10,"station":"woodworking_station","cat":"🗡️ Weapons"},
     "advanced_spear":     {"mat": {"plank":5,"rock":30},      "igm":90, "energy":15,"station":"woodworking_station","cat":"🗡️ Weapons"},
     "ice_spear":          {"mat": {"plank":2,"ice_chunk":5},  "igm":45, "energy":8, "station":"woodworking_station","cat":"🗡️ Weapons"},
     "advanced_ice_spear": {"mat": {"plank":5,"ice_chunk":15}, "igm":90, "energy":15,"station":"woodworking_station","cat":"🗡️ Weapons"},
-    "fresh_water":        {"mat": {"freezing_water":1},        "igm":60, "energy":5, "station":"furnace","fuel":1,  "cat":"🍳 Furnace"},
+    "fresh_water":        {"mat": {"freezing_water":1},        "igm":5,  "energy":5, "station":"furnace","fuel":1,  "cat":"🍳 Furnace"},
     "dirty_water":        {"mat": {"freezing_dirty_water":1},  "igm":30, "energy":3, "station":"furnace","fuel":1,  "cat":"🍳 Furnace"},
-    "filtered_water":     {"mat": {"water":1},                 "igm":30, "energy":5,  "station":"water_filter",      "cat":"🏭 Stations"},
+    "filtered_water":     {"mat": {"dirty_water":1},            "igm":10, "energy":5,  "station":"water_filter",      "cat":"🏭 Stations"},
     "pants":              {"mat": {"fabric":5},                "igm":120,"energy":8, "station":"sewing_station",    "cat":"🧵 Sewing"},
     "shirt":              {"mat": {"fabric":5},                "igm":120,"energy":8, "station":"sewing_station",    "cat":"🧵 Sewing"},
     "medium_pants":       {"mat": {"fabric":10},               "igm":120,"energy":12,"station":"sewing_station",    "cat":"🧵 Sewing"},
@@ -1471,7 +1577,7 @@ CONSUME_ALIASES = {
     "moss":"moss_harmful","healing moss":"moss_healing","mystery moss":"moss_mystery",
     "bandage":"bandages","bandages":"bandages",
     "enhanced bandage":"enhanced_bandage","enhanced_bandage":"enhanced_bandage",
-    "ironroot":"ironroot","game":"raw_game","raw game":"raw_game",
+    "ironroot":"ironroot","game":"raw_game","raw game":"raw_game","raw meat":"raw_game","raw_meat":"raw_game",
     "poisonous":"poisonous_berry","poisonous berry":"poisonous_berry",
     "freezing water":"freezing_water","freezing_water":"freezing_water",
     "freezing dirty water":"freezing_dirty_water","freezing_dirty_water":"freezing_dirty_water",
@@ -1564,23 +1670,72 @@ rest — toggles resting on/off. Moving also cancels rest.
 At 0 Fatigue: gathering and most actions are BLOCKED.
 Use coffee (buy from shop, or brew: coffee_beans + water in furnace) for +25😴.
 """,
+    "5. 🗡️ Hunting & Weapons": """🗡️ HUNTING & WEAPONS
+Use a spear to hunt animals from close range or at a distance.
+Attack with:  a / attack      — melee strike within 2 tiles
+Throw with:  t / throw       — ranged attack, breaks the spear faster
+
+Weapon notes:
+  • Light spears are fast and durable.
+  • Ice spears deal extra damage but break on throw.
+  • Poison your spear with: poison spear
+
+Hunting strategy:
+  1. Use walk to <name> or walk to (<x>,<y>) to reach animals.
+  2. Watch the scan list for nearby wildlife and distances.
+  3. Attack rabbits and squirrels at close range.
+  4. Throw at deer, antelope or fish for safer hits.
+
+Best prey:
+  • rabbit  — easiest early game meat.
+  • squirrel — fast and tricky.
+  • deer    — tougher, great reward for throwing.
+  • salmon  — Arctic water fish, hunt from shore.
+
+Pro tips:
+  • Use walk to (-1, 4) with parentheses for exact coordinates.
+  • Craft better armor before heading into stormy weather.
+  • Inspect unknown items before eating or using them.
+""",
 }
 
 # ==================== TERMINAL ====================
 class Terminal:
     def __init__(self):
-        self.fd = sys.stdin.fileno()
-        self.old = termios.tcgetattr(self.fd)
+        self.using_windows_fallback = not HAVE_TERMIOS
+        if self.using_windows_fallback:
+            self.fd = None
+            self.old = None
+        else:
+            self.fd = sys.stdin.fileno()
+            self.old = termios.tcgetattr(self.fd)
 
     def setup(self):
-        tty.setraw(self.fd)
+        if not self.using_windows_fallback:
+            tty.setraw(self.fd)
 
     def cleanup(self):
         sys.stdout.write("\033[2J\033[1;1H\033[?25h")
-        termios.tcsetattr(self.fd, termios.TCSANOW, self.old)
+        if not self.using_windows_fallback:
+            termios.tcsetattr(self.fd, termios.TCSANOW, self.old)
         sys.stdout.flush()
 
     def get_key(self, timeout=0.1):
+        if self.using_windows_fallback:
+            start = time.time()
+            while time.time() - start < timeout:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ('\x00', '\xe0'):
+                        seq = msvcrt.getwch()
+                        if seq == 'H': return 'UP'
+                        if seq == 'P': return 'DOWN'
+                        if seq == 'M': return 'RIGHT'
+                        if seq == 'K': return 'LEFT'
+                        return None
+                    return ch
+            return None
+
         r, _, _ = select.select([self.fd], [], [], timeout)
         if not r: return None
         try: char = os.read(self.fd, 1).decode('utf-8', errors='ignore')
@@ -1590,14 +1745,35 @@ class Terminal:
             r2, _, _ = select.select([self.fd], [], [], 0.05)
             if r2:
                 seq = os.read(self.fd, 16).decode('utf-8', errors='ignore')
-                if seq.startswith("[A"): return 'UP'
-                if seq.startswith("[B"): return 'DOWN'
-                if seq.startswith("[C"): return 'RIGHT'
-                if seq.startswith("[D"): return 'LEFT'
+                key_result = None
+                if seq.startswith("[A"): key_result = 'UP'
+                elif seq.startswith("[B"): key_result = 'DOWN'
+                elif seq.startswith("[C"): key_result = 'RIGHT'
+                elif seq.startswith("[D"): key_result = 'LEFT'
+                if key_result:
+                    # Flush any buffered arrow-key repeats to prevent drift
+                    try: termios.tcflush(self.fd, termios.TCIFLUSH)
+                    except Exception: pass
+                    return key_result
             return None
         return char
 
     def get_key_no_flush(self, timeout=0.1):
+        if self.using_windows_fallback:
+            start = time.time()
+            while time.time() - start < timeout:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ('\x00', '\xe0'):
+                        seq = msvcrt.getwch()
+                        if seq == 'H': return 'UP'
+                        if seq == 'P': return 'DOWN'
+                        return None
+                    if ch == '\x1b':
+                        return 'ESC'
+                    return ch
+            return None
+
         r, _, _ = select.select([self.fd], [], [], timeout)
         if not r: return None
         try: char = os.read(self.fd, 1).decode('utf-8', errors='ignore')
@@ -1617,7 +1793,13 @@ class Terminal:
         sys.stdout.write("\033[2J\033[H" + out + "\r\n"); sys.stdout.flush()
 
     def print_page(self, lines, wait=True):
-        out = "\r\n".join(vfit(str(l), TERM_WIDTH) for l in lines)
+        wrapped = []
+        for l in lines:
+            if l == "":
+                wrapped.append("")
+            else:
+                wrapped.extend(vwrap(str(l), TERM_WIDTH))
+        out = "\r\n".join(vfit(str(l), TERM_WIDTH) for l in wrapped)
         if wait: out += "\r\n\r\n  [Press Enter to continue]\r\n"
         sys.stdout.write("\033[2J\033[H" + out); sys.stdout.flush()
         if wait:
@@ -1649,12 +1831,27 @@ class Terminal:
         sys.stdout.write("\033[2J\033[0m"); sys.stdout.flush()
 
     def render_main(self, header, scan, msg, prompt, buf, player=None, paused=False):
-        sys.stdout.write("\033[H")
+        sys.stdout.write("\033[2J\033[H")
         try: cols, term_h = os.get_terminal_size()
         except: cols, term_h = TERM_WIDTH, 24
-        term_w = min(cols, TERM_WIDTH)
-        if term_h < 10: term_h = 10
-        max_scan = term_h - 12
+        term_w = max(20, cols)  # Use full terminal width without capping
+        if term_h < 3: term_h = 3
+        # If caller didn't provide a proper HUD header (e.g. during overlays),
+        # synthesize a minimal top HUD from `player` so stats/biome always show.
+        if player is not None:
+            has_header = bool(header and any(tok in (header[0] or "") for tok in ("@(", "DAY", "NIGHT", "🌙", "☀️")))
+            if not has_header:
+                try:
+                    day_label = '🌙 NIGHT' if player.time_of_day == 'night' else '☀️ DAY'
+                    biome_label = '🌲 Forest' if biome_at(player.x, player.y) == 'Forest' else '❄️ Arctic'
+                    dist_lbl = ('↗️' if dist_to_border(player.x, player.y) > 0 else '↙️') + str(abs(int(dist_to_border(player.x, player.y))))
+                    h1 = f"{day_label} | 📍@({player.x},{player.y}) | {biome_label} | 🧭{dist_lbl}"
+                    h2 = f"❤️{player.health:.0f} | 🍽️{player.hunger:.0f} | 💧{player.thirst:.0f} | ⚡{int(player.energy)} | 😴{int(player.fatigue)}"
+                    h3 = f"🪙{player.coins:.0f} | 📚{player.inventory.get('textbook',0)} | { _temp_label(player.temp) }"
+                    header = [h1, h2, h3] + (header or [])
+                except Exception:
+                    header = header or []
+        max_scan = max(0, term_h - (len(header) if header else 3) - 8)
         scan = scan[:max_scan]
         out = list(header)
         out.append("─" * term_w)
@@ -1664,8 +1861,12 @@ class Terminal:
         out.append("")
         if player and player.active_tasks:
             t = player.active_tasks[0]
-            rem = max(0, int(t["end"] - time.time()))
+            if paused:
+                rem = t.get("paused_remaining", max(0, int(t["end"] - time.time())))
+            else:
+                rem = max(0, int(t["end"] - time.time()))
             out.append(f"🔨 Crafting: {t['item'].replace('_',' ').title()} ({rem}s) — movement locked")
+        trap_status = ""
         if paused:
             out.append("⏸️ GAME PAUSED — time, weather, and auto-walk are frozen until you resume.")
         elif player and player.resting:
@@ -1676,23 +1877,51 @@ class Terminal:
             setting = sum(1 for t in player.traps if t.get('status') == 'setting')
             caught  = sum(1 for t in player.traps if t.get('status') == 'caught')
             parts = []
-            if setting: parts.append(f"⏳{setting} setting")
             if caught:  parts.append(f"🟢{caught} CAUGHT!")
-            out.append("🪤 Traps: " + " | ".join(parts))
-        else:
-            out.append(" " * term_w)
-        if buf:
-            out.append(buf)
-        else:
-            out.append(" " * term_w)
-        out.append(f"{prompt}{buf}")
+            if setting: parts.append(f"⏳{setting} setting")
+            trap_status = " | ".join(parts) if parts else ""
+        out.append(" " * term_w)
+        # Append trap status to prompt line if there are traps, to avoid overlay blocking
+        prompt_with_trap = prompt
+        if trap_status:
+            prompt_with_trap = f"🪤 {trap_status} {prompt}"
+        # Ensure the typed buffer is visible: if the prompt is long, truncate it so at least
+        # one column is available for the buffer; otherwise show as much of the buffer as fits.
+        buf_to_show = ""
+        try:
+            if vlen(buf) == 0:
+                prompt_disp = prompt_with_trap
+                buf_to_show = ""
+            else:
+                avail = term_w - vlen(prompt_with_trap)
+                if avail <= 0:
+                    # Leave room for one char of buffer
+                    prompt_disp = vtrunc(prompt_with_trap, max(0, term_w - 1))
+                    buf_to_show = vtrunc(buf[-1:], 1)
+                else:
+                    prompt_disp = prompt_with_trap
+                    buf_to_show = vtrunc(buf, avail)
+        except Exception:
+            prompt_disp = prompt_with_trap; buf_to_show = vtrunc(buf, term_w)
+        out.append(f"{prompt_disp}{buf_to_show}")
         while len(out) < term_h: out.append(" " * term_w)
-        out = out[:term_h]
+        if len(out) > term_h:
+            header_len = len(header) + 1 if header else 1
+            if header_len >= term_h:
+                out = out[:term_h]
+            else:
+                tail_len = term_h - header_len
+                out = out[:header_len] + out[-tail_len:]
         final = "\r\n".join([vfit(str(l), term_w) for l in out])
         sys.stdout.write(final + "\033[J")
-        cursor_pos = vlen(prompt) + vlen(buf) + 1
-        if cursor_pos > term_w: cursor_pos = term_w
-        sys.stdout.write(f"\033[{term_h};{cursor_pos}H\033[?25h"); sys.stdout.flush()
+        # Position cursor at the end of the visible text (after buffer)
+        # Position cursor at end of visible buffer portion
+        prompt_vlen = vlen(prompt_disp)
+        buf_vlen = vlen(buf_to_show)
+        cursor_col = prompt_vlen + buf_vlen + 1
+        # Ensure cursor doesn't go off-screen
+        if cursor_col > term_w: cursor_col = term_w
+        sys.stdout.write(f"\033[{term_h};{cursor_col}H\033[?25h"); sys.stdout.flush()
 
 # ==================== TUTORIAL ====================
 def run_tutorial(term):
@@ -1720,7 +1949,7 @@ def run_tutorial(term):
          "Auto-walk to a resource:",
          "  walk to mushrooms     walk to spider     walk to water", "",
          "Moving while resting cancels your rest automatically.", "",
-         "⚠️  You CANNOT move while crafting! Wait for the craft to finish.",
+         "⚠️  You CANNOT move while crafting! Wait for the craft to finish, or use the cancel command.",
          "⚠️  You CANNOT gather while crafting or at 0 Fatigue!", "",
          "⏸️  Type 'pause' to freeze the game while you read help or plan your next move."],
         ["👁️ THE SCAN VIEW", "═" * TERM_WIDTH, "",
@@ -1964,25 +2193,29 @@ class WeatherSystem:
             self.current = "🏜️ dry"; self.dry_streak += 1
             if self.dry_streak > 3: self.is_drought = True
             # Firestorm: 10% chance in dry Forest weather
-            if not self.firestorm_active and biome_at(player.x, player.y) == "Forest" and random.random() < 0.10:
+            if not self.firestorm_active and biome_at(player.x, player.y) == "Forest" and dist_to_border(player.x, player.y) > 200 and random.random() < 0.10:
                 self.firestorm_active = True
-                cluster_keys = list(world.clusters.keys())
+                water_items = {"water", "fresh_water", "dirty_water", "freezing_water", "freezing_dirty_water", "arctic_water"}
+                cluster_keys = [k for k in world.clusters.keys() if world.clusters[k].get("real_item") not in water_items]
                 random.shuffle(cluster_keys)
-                burn_count = int(len(cluster_keys) * 0.80)
+                burn_count = max(1, int(len(cluster_keys) * 0.20)) if cluster_keys else 0
                 for k in cluster_keys[:burn_count]:
                     cx, cy = k
                     world.clusters[k] = {
-                        "name": "🔥 Ash", "real_item": "ash", "category": "material",
+                        "name": "🔥 Fire", "real_item": "fire", "category": "hazard",
                         "is_identified": True, "inspection_attempts": 0,
-                        "pos": [cx, cy], "qty": 3,
-                        "meta": {"regrows": False, "hazard_key": None, "is_ash": True}
+                        "pos": [cx, cy], "qty": 1,
+                        "meta": {"regrows": False, "hazard_key": None, "is_burning": True}
                     }
                 for k in cluster_keys[burn_count:]:
-                    world.clusters[k]["qty"] = max(1, int(world.clusters[k].get("qty", 1) * 0.20))
+                    c = world.clusters.get(k)
+                    if c:
+                        c["qty"] = max(1, int(c.get("qty", 1) * 0.20))
                 if biome_at(player.x, player.y) == "Forest":
-                    player.health -= 15; player.on_fire = True; player.fire_start = time.time()
+                    player.note_damage_cause("Burned by firestorm")
+                    player.health -= 10; player.on_fire = True; player.fire_start = time.time()
                     player.temp = 100.0
-                return "🔥🌲 FIRESTORM! The forest is burning! -15 HP! Move to water to extinguish!"
+                return "🔥🌲 FIRESTORM! The forest is burning! -10 HP! Move to water to extinguish!"
             return "🔥 Dry heat today."
         self.dry_streak = 0; self.is_drought = False
         choices = [("heavy_storm",15),("medium_storm",25),("light_storm",35),("light_rain",45)]
@@ -2019,6 +2252,7 @@ class WeatherSystem:
             multiplier = player.armor_damage_multiplier()
             dmg = int(round(dmg * multiplier))
             if dmg > 0:
+                player.note_damage_cause("Lightning strike")
                 if player.wearing:
                     player.armor_dur -= dmg
                     if player.armor_dur <= 0:
@@ -2052,11 +2286,16 @@ class WeatherSystem:
             t_data = TORNADO_TYPES[self.tornado_type]
             self.current = f"🌪️ TORNADO ({self.tornado_type.upper()})"
             
-            # Move tornado each turn (random walk)
-            if random.random() < 0.7:
-                angle = random.random() * math.tau
-                self.tornado_x += math.cos(angle) * 2
-                self.tornado_y += math.sin(angle) * 2
+            # Move tornado each turn — persistent direction with drift
+            if not hasattr(self, '_tornado_dir'):
+                self._tornado_dir = random.random() * math.tau
+            # 50% chance to drift the direction significantly
+            if random.random() < 0.50:
+                self._tornado_dir += random.uniform(-1.2, 1.2)
+            self._tornado_dir %= math.tau
+            step = random.uniform(8, 18)
+            self.tornado_x += math.cos(self._tornado_dir) * step
+            self.tornado_y += math.sin(self._tornado_dir) * step
             
             # Only damage if player is within tornado radius
             dist_to_player = math.hypot(player.x - self.tornado_x, player.y - self.tornado_y)
@@ -2070,6 +2309,7 @@ class WeatherSystem:
             
             animal_msg = ""
             if dmg > 0:
+                player.note_damage_cause("Tornado strike")
                 multiplier = player.armor_damage_multiplier()
                 dmg = int(round(dmg * multiplier))
                 if dmg > 0:
@@ -2161,7 +2401,6 @@ class WeatherSystem:
             self.tornado_active = True; self.tornado_type = spawn
             self.tornado_timer = TORNADO_TYPES[spawn]["duration_mins"]
             self.current = f"🌪️ TORNADO ({spawn.upper()})"
-            self.tornado_hit = True
             return f"⚠️ TORNADO WARNING: {TORNADO_TYPES[spawn]['name']} detected at @({int(self.tornado_x)},{int(self.tornado_y)})!"
         return None
 
@@ -2178,6 +2417,9 @@ class Player:
         self.last_passive = time.time(); self.last_day = time.time()
         self.last_weather_check = time.time()
         self.last_starvation_tick = 0.0
+        self.last_hunger_tick = 0.0
+        self.last_thirst_tick = 0.0
+        self.last_damage_cause = ""
         self.traps = []; self.active_tasks = []
         self.auto_walk_target = None
         self.campfire_fuel = 0      # remaining fuel parts in active campfire
@@ -2186,7 +2428,7 @@ class Player:
         self.rest_last = 0.0
         self.axe_dur = TOOL_DUR; self.pickaxe_dur = 0
         self.armor_dur = 0; self.wearing = None
-        self.station_hp = {"woodworking_station":500.0,"furnace":0.0,"water_filter":0.0,"sewing_station":0.0,"smelter":0.0}
+        self.station_hp = {"woodworking_station":500.0,"furnace":0.0,"water_filter":0.0,"sewing_station":0.0,"smelter":0.0,"liquifier":0.0}
         self.inventory = {k:0 for k in ITEM_PRICES.keys()}
         self.inventory.update({"id_lens":0,"textbook":0,"woodworking_station":1,"furnace":0,"water_filter":0,"liquifier":0,"poison_trap":0,"sewing_station":0,"smelter":0,"axe":1,"advanced_axe":0,"poisonous_berry":0,"fire_fuel":0,"coffee_beans":0,"coffee":0,"pants":0,"shirt":0,"medium_pants":0,"medium_shirt":0,"heavy_pants":0,"heavy_shirt":0,"snow":0})
         self.auto_walk_target = None
@@ -2276,6 +2518,20 @@ class Player:
     def armor_damage_multiplier(self):
         return {"light_armor": 0.80, "medium_armor": 0.60, "heavy_armor": 0.30}.get(self.wearing, 1.0)
 
+    def armor_hazard_reduction(self, hazard_key):
+        """Per-hazard flat damage reduction by armor type (stacks with multiplier for monsters/weather).
+        Returns flat HP reduction to subtract from final_dmg for gather hazards."""
+        w = self.wearing
+        reductions = {
+            "spider nest":     {"light_armor": 5,  "medium_armor": 8,  "heavy_armor": 8},
+            "venomous spider": {"light_armor": 5,  "medium_armor": 10, "heavy_armor": 10},
+            "bee hive":        {"light_armor": 5,  "medium_armor": 10, "heavy_armor": 20},
+        }
+        return reductions.get(hazard_key, {}).get(w, 0)
+
+    def note_damage_cause(self, cause):
+        self.last_damage_cause = cause
+
     def update_passive(self):
         now = time.time(); dt = now - self.last_passive
         if dt >= 0.5:
@@ -2285,13 +2541,26 @@ class Player:
             self.energy = max(0, self.energy - dt * PASSIVE_ENERGY_RATE)
             self.fatigue = max(0, self.fatigue - dt * FATIGUE_PASSIVE_RATE)
             if self.hunger <= 0:
-                if self.last_starvation_tick == 0.0 or (now - self.last_starvation_tick) >= 30.0:
-                    self.last_starvation_tick = now
+                if self.last_hunger_tick == 0.0 or (now - self.last_hunger_tick) >= 30.0:
+                    self.last_hunger_tick = now
+                    self.note_damage_cause("Starvation")
                     self.health = max(0, self.health - 10)
+                    self._starvation_flash = True
             else:
-                self.last_starvation_tick = 0.0
-            if self.thirst <= 0: self.health -= dt * 0.2
-            if self.on_fire: self.health = max(0, self.health - dt * 5.0)
+                self.last_hunger_tick = 0.0
+                if hasattr(self, '_starvation_flash'): self._starvation_flash = False
+            if self.thirst <= 0:
+                if self.last_thirst_tick == 0.0 or (now - self.last_thirst_tick) >= 30.0:
+                    self.last_thirst_tick = now
+                    self.note_damage_cause("Dehydration")
+                    self.health = max(0, self.health - 10)
+                    self._thirst_flash = True
+            else:
+                self.last_thirst_tick = 0.0
+                if hasattr(self, '_thirst_flash'): self._thirst_flash = False
+            if self.on_fire:
+                self.note_damage_cause("Burned alive")
+                self.health = max(0, self.health - dt * 2.5)
             # ---- Insulation & temperature ----
             player_insulation = (CLOTHING_INSULATION.get(self.wearing_pants, 0) +
                                  CLOTHING_INSULATION.get(self.wearing_shirt, 0))
@@ -2301,30 +2570,87 @@ class Player:
             if self.on_fire:
                 self.temp = 100.0
             elif self.resting and self.rest_mode == "campfire" and self.campfire_fuel > 0:
-                self.temp = min(100.0, self.temp + TEMP_CAMPFIRE_RISE * dt)
+                if biome_at(self.x, self.y) == "Arctic":
+                    # In Arctic: campfire warms you toward body temp (neutral), not to burning
+                    self.temp = min(37.0, self.temp + TEMP_CAMPFIRE_RISE * 0.3 * dt)
+                else:
+                    self.temp = min(70.0, self.temp + TEMP_CAMPFIRE_RISE * 0.5 * dt)
             elif cur_biome_t == "Arctic":
-                effective_req = self.arctic_insulation_req
+                # Gradient: within 200 coords of border, arctic cold is reduced
+                arctic_depth = max(0.0, -dist_to_border(self.x, self.y))  # 0 at border
+                GRADIENT_DEPTH = 200.0
+                gradient_frac = min(1.0, arctic_depth / GRADIENT_DEPTH)  # 0 at border, 1 at full arctic
+                # Effective insulation requirement scales with how deep into Arctic you are
+                effective_req = self.arctic_insulation_req * gradient_frac
                 deficit = max(0.0, effective_req - player_insulation)
-                drop_frac = deficit / max(1.0, effective_req)
-                self.temp = max(0.0, self.temp - TEMP_ARCTIC_DROP * drop_frac * dt)
+                if effective_req > 0:
+                    drop_frac = deficit / max(1.0, effective_req)
+                else:
+                    drop_frac = 0.0
+                if deficit > 0:
+                    self.temp = max(0.0, self.temp - TEMP_ARCTIC_DROP * drop_frac * gradient_frac * dt)
+                else:
+                    warm_rate = TEMP_FOREST_DRIFT * 0.5 + 0.5 * gradient_frac
+                    self.temp = min(TEMP_NEUTRAL, self.temp + warm_rate * dt)
             else:
-                if self.temp < TEMP_NEUTRAL:
-                    self.temp = min(TEMP_NEUTRAL, self.temp + TEMP_FOREST_DRIFT * dt)
-                elif self.temp > TEMP_NEUTRAL:
-                    self.temp = max(TEMP_NEUTRAL, self.temp - TEMP_FOREST_DRIFT * dt)
-            # Arctic cold damage — insulation-level system
-            if cur_biome_t == "Arctic":
-                effective_req = self.arctic_insulation_req
+                # Gradient: within 200 coords of border in Forest, drift toward colder
+                forest_dist = dist_to_border(self.x, self.y)  # positive in forest
+                GRADIENT_DEPTH = 200.0
+                if forest_dist <= GRADIENT_DEPTH:
+                    gradient_frac = forest_dist / GRADIENT_DEPTH  # 0 at border, 1 far in forest
+                    target = TEMP_NEUTRAL * gradient_frac  # cooler near border
+                else:
+                    target = TEMP_NEUTRAL
+                if self.temp < target:
+                    self.temp = min(target, self.temp + TEMP_FOREST_DRIFT * dt)
+                elif self.temp > target:
+                    self.temp = max(target, self.temp - TEMP_FOREST_DRIFT * dt)
+            # Arctic cold damage — insulation-level system (campfire overrides)
+            if cur_biome_t == "Arctic" and not (self.resting and self.rest_mode == "campfire" and self.campfire_fuel > 0):
+                base_req = self.arctic_insulation_req
+                # Gradient: within 200 coords of border, insulation requirement is reduced
+                arctic_depth = max(0.0, -dist_to_border(self.x, self.y))
+                GRADIENT_DEPTH = 200.0
+                gradient_frac = min(1.0, arctic_depth / GRADIENT_DEPTH)
+                # Apply gradient to insulation requirement (lower requirement near border)
+                effective_req = base_req * gradient_frac
                 deficit = max(0.0, effective_req - player_insulation)
                 if deficit > 0:
-                    cold_rate = (TEMP_COLD_DMG_FULL / GAME_HOUR) * (deficit / ARCTIC_INSULATION_BASE)
+                    self.note_damage_cause("Hypothermia")
+                    cold_rate = (TEMP_COLD_DMG_FULL / GAME_HOUR) * (deficit / max(1.0, effective_req)) * gradient_frac
                     self.health = max(0, self.health - cold_rate * dt)
-            # Heat damage (from environment temp, not direct fire)
-            if self.temp > TEMP_HOT_THRESH and not self.on_fire:
+            # Heat damage (from environment temp, not direct fire) - only in Forest, not Arctic
+            if self.temp > TEMP_HOT_THRESH and not self.on_fire and cur_biome_t != "Arctic":
+                self.note_damage_cause("Heat stroke")
                 hot_frac = (self.temp - TEMP_HOT_THRESH) / (100.0 - TEMP_HOT_THRESH)
                 multiplier = 2.0 if both_worn else 1.0
                 hot_rate = TEMP_HOT_DMG_FULL / GAME_HOUR * multiplier
                 self.health = max(0, self.health - hot_rate * hot_frac * dt)
+            # Frostberry transformation: 5 real minutes in warm temp (>= TEMP_NEUTRAL) -> normal berries
+            FROSTBERRY_THAW_TIME = 300.0  # 5 minutes
+            if self.inventory.get("frostberry", 0) > 0 and self.temp >= 36.0:
+                if self.frostberry_warm_since == 0.0:
+                    self.frostberry_warm_since = now
+                elif (now - self.frostberry_warm_since) >= FROSTBERRY_THAW_TIME:
+                    qty = self.inventory.pop("frostberry", 0)
+                    self.inventory["wild_berries"] = self.inventory.get("wild_berries", 0) + qty
+                    self.frostberry_warm_since = 0.0
+                    # (message shown on next render)
+                    self._frostberry_thaw_msg = qty
+            else:
+                self.frostberry_warm_since = 0.0
+            # Freezing water transformation: 5 real seconds in warm temp (>= 36°) -> fresh_water
+            FREEZING_WATER_THAW_TIME = 5.0  # 5 seconds
+            if self.inventory.get("freezing_water", 0) > 0 and self.temp >= 36.0:
+                if self.freezing_water_warm_since == 0.0:
+                    self.freezing_water_warm_since = now
+                elif (now - self.freezing_water_warm_since) >= FREEZING_WATER_THAW_TIME:
+                    qty = self.inventory.pop("freezing_water", 0)
+                    self.inventory["fresh_water"] = self.inventory.get("fresh_water", 0) + qty
+                    self.freezing_water_warm_since = 0.0
+                    self._freezing_water_thaw_msg = qty
+            else:
+                self.freezing_water_warm_since = 0.0
             if self.health <= 0: return "dead"
             # Rest ticking: fires once per GAME_HOUR of real time while resting
             if self.resting and self.rest_last > 0 and (now - self.rest_last) >= GAME_HOUR:
@@ -2467,20 +2793,8 @@ class Player:
             hk = cl["meta"].get("hazard_key")
             h = HAZARDS.get(hk, {})
             if h and random.random() < h.get("chance", 0.5):
-                # Make detours 3x shorter to reduce long auto-walk pauses
-                detour_secs = h.get("detour", 5.0) / 3.0
-                dmg = h.get("dmg", 0)
-                if self.wearing == "heavy_armor":
-                    dmg = 0
-                elif self.wearing == "medium_armor" and hk in ("spider nest","venomous spider"):
-                    dmg = 0
-                elif self.wearing == "medium_armor" and hk == "bee hive":
-                    dmg = 10
-                if dmg > 0:
-                    self.health -= dmg
-                    detour_msg = f"💥 Hazard hit while walking! -{dmg} HP. Detour adds {detour_secs:.1f}s."
-                else:
-                    detour_msg = f"🛡️ Avoided hazard while walking. Detour adds {detour_secs:.1f}s."
+                detour_secs = h.get("detour", 3.0)
+                detour_msg = f"🛡️ Hazard detour while walking — adds {detour_secs:.1f}s."
                 self.total_travel_mins += detour_secs / 60.0
                 if detour_secs > 0:
                     # Snooze this hazard on this cluster so we don't repeatedly trigger
@@ -2534,12 +2848,16 @@ class Player:
         return key, self.inventory[key]
 
     def count_any_berry(self):
-        """Total berry items of any type in inventory."""
-        return sum(self.inventory.get(b, 0) for b in BERRY_ITEMS)
+        """Total berry items of any type in inventory (including unknown berries)."""
+        known = sum(self.inventory.get(b, 0) for b in BERRY_ITEMS)
+        unknown_b = self.inventory.get("unknown_berries", {})
+        unk = unknown_b.get("qty", 0) if isinstance(unknown_b, dict) else 0
+        return known + unk
 
     def deduct_any_berry(self, qty):
         """Deduct qty berries from inventory (any type, prioritizing cheapest)."""
         remaining = qty
+        # Deduct unknown berries last (they are risky)
         for b in BERRY_ITEMS:
             have = self.inventory.get(b, 0)
             take = min(have, remaining)
@@ -2547,6 +2865,15 @@ class Player:
                 self.inventory[b] -= take
                 remaining -= take
             if remaining <= 0: break
+        if remaining > 0:
+            unk_key = "unknown_berries"
+            if unk_key in self.inventory and isinstance(self.inventory[unk_key], dict):
+                have = self.inventory[unk_key].get("qty", 0)
+                take = min(have, remaining)
+                if take > 0:
+                    self.inventory[unk_key]["qty"] -= take
+                    if self.inventory[unk_key]["qty"] <= 0:
+                        del self.inventory[unk_key]
 
     def start_task(self, item, recipe):
         """
@@ -2554,7 +2881,7 @@ class Player:
         Returns (ok: bool, message: str).
         """
         if self.active_tasks:
-            return False, "🔨 Already crafting! Wait for it to finish."
+            return False, "🔨 Already crafting! Wait for it to finish, or use the 'cancel' command."
 
         # Station check
         station = recipe.get("station")
@@ -2564,13 +2891,30 @@ class Player:
                 if st and self.inventory.get(st, 0) <= 0:
                     return False, f"❌ Need a {st.replace('_',' ')} station to craft this."
 
-        # Material check
+        # Material check — allow filtered_water to substitute for fresh_water
         mat = recipe.get("mat", {})
-        missing = []
+        # Build effective mat dict with water substitution
+        eff_mat = {}
         for k, v in mat.items():
+            if k == "fresh_water":
+                # Use fresh_water first, then filtered_water if short
+                have_fresh = self.inventory.get("fresh_water", 0)
+                have_filt  = self.inventory.get("filtered_water", 0)
+                if have_fresh >= v:
+                    eff_mat["fresh_water"] = v
+                elif have_fresh + have_filt >= v:
+                    eff_mat["fresh_water"] = have_fresh
+                    eff_mat["filtered_water"] = eff_mat.get("filtered_water", 0) + (v - have_fresh)
+                else:
+                    eff_mat[k] = v  # will trigger missing error
+            else:
+                eff_mat[k] = v
+        missing = []
+        for k, v in eff_mat.items():
             have = self.inventory.get(k, 0)
             if have < v:
-                missing.append(f"{v} {k.replace('_',' ')} (have {have})")
+                display_k = "fresh water or filtered water" if k == "fresh_water" else k.replace("_"," ")
+                missing.append(f"{v} {display_k} (have {have})")
         if missing:
             return False, f"❌ Missing: need {', '.join(missing)}."
 
@@ -2580,17 +2924,29 @@ class Player:
             return False, f"⚡ Need {energy_cost} energy to craft this (have {int(self.energy)})."
 
         # Deduct materials and energy
-        for k, v in mat.items():
+        for k, v in eff_mat.items():
             self.inventory[k] = self.inventory.get(k, 0) - v
         self.energy = max(0, self.energy - energy_cost)
 
         # Schedule task (igm is used as real-time seconds for crafting duration)
         igm = recipe.get("igm", 10)
+        # Apply half-finished item discount
+        prog = getattr(self, 'craft_progress', {}).get(item)
+        if prog:
+            igm = max(1, igm - int(prog['elapsed']))
+            del self.craft_progress[item]
+            # Also consume the half-finished item
+            half_key = 'half_' + item
+            if self.inventory.get(half_key, 0) > 0:
+                self.inventory[half_key] -= 1
+                if self.inventory[half_key] <= 0:
+                    del self.inventory[half_key]
         task = {
             "item": item,
             "end": time.time() + igm,
             "igm": igm,
             "station": station,
+            "mat_used": dict(eff_mat),
         }
         if recipe.get("yield"):
             task["yield"] = recipe["yield"]
@@ -2619,6 +2975,7 @@ class World:
         self.biome = biome; self.time_of_day = time_of_day
         self.clusters = {}; self.depleted = set()
         self.last_regen = time.time()
+        self.last_fire_tick = 0.0
         self.animals = []
         self.last_spawn = 0.0
         self.last_young_spawn = 0.0
@@ -2758,6 +3115,9 @@ class World:
             elif meta["item"] == "bee_hive": chance = 0.20
             elif meta["item"] == "ironroot": chance = 0.35
             elif meta["item"] in ["berries","mushrooms"]: chance = 0.50
+            # Trees are very rare in Arctic (wood not in Arctic BIOME_RESOURCES so this applies to any stray spawns)
+            if pos_biome == "Arctic" and meta["item"] == "wood": chance = 0.03
+            # Fibergrass doesn't grow in Arctic (already not in Arctic BIOME_RESOURCES)
             # Apply arctic weather modifiers to spawn chance
             if pos_biome == "Arctic" and self.arctic_weather_mods:
                 rate_m = self.arctic_weather_mods.get(meta["item"], {}).get("cluster_rate_mult", 1.0)
@@ -2771,7 +3131,7 @@ class World:
             display_name = DISPLAY_ITEM_NAME_MAP.get(real_item, name)
         else:
             display_name = UNKNOWN_NAME_MAP.get(real_item, f"❓ Unknown {category.title()}")
-        qty = 1 if meta["item"] == "bee_hive" else rng.randint(4, 12)
+        qty = 1 if meta["item"] == "bee_hive" else min(50, rng.randint(4, 12))
         # Apply arctic weather qty modifier
         if pos_biome == "Arctic" and self.arctic_weather_mods:
             qty_m = self.arctic_weather_mods.get(meta["item"], {}).get("qty_mult", 1.0)
@@ -2838,11 +3198,109 @@ class World:
         now = time.time()
         if now - self.last_regen >= 30:
             self.last_regen = now
+            # Remove fibergrass from Arctic (misplaced at border)
+            for pos in [p for p, c in list(self.clusters.items()) if c.get("real_item") == "fibergrass" and biome_at(p[0], p[1]) == "Arctic"]:
+                del self.clusters[pos]
+            # Remove forest-only animals from Arctic
+            _arctic_forest_only = ("rabbit","young_rabbit","squirrel","young_squirrel","deer","young_deer","antelope","young_antelope")
+            self.animals = [a for a in self.animals if not (a["type"] in _arctic_forest_only and biome_at(a["x"], a["y"]) == "Arctic")]
+            new_spillovers = {}
             for pos, c in list(self.clusters.items()):
                 if c.get("qty",0) <= 0:
                     self.depleted.add(pos); del self.clusters[pos]; continue
                 if c.get("meta",{}).get("regrows") and c["qty"] < 100 and random.random() < 0.3:
                     c["qty"] += 1
+                # Spillover: if > 50, split excess to adjacent coord
+                if c.get("qty", 0) > 50:
+                    excess = c["qty"] - 50
+                    c["qty"] = 50
+                    for dx, dy in ((1,0),(-1,0),(0,1),(0,-1)):
+                        npos = (pos[0]+dx, pos[1]+dy)
+                        if npos not in self.clusters and npos not in new_spillovers:
+                            import copy
+                            nc = copy.copy(c)
+                            nc["qty"] = min(excess, 25)
+                            nc["pos"] = [npos[0], npos[1]]
+                            new_spillovers[npos] = nc
+                            break
+            self.clusters.update(new_spillovers)
+
+    def update_fire(self, weather, player):
+        now = time.time()
+        if now - self.last_fire_tick < 2.0:
+            return
+        self.last_fire_tick = now
+        if not weather.firestorm_active:
+            return
+
+        water_items = {"water", "fresh_water", "dirty_water", "freezing_water", "freezing_dirty_water", "arctic_water"}
+        burning = [pos for pos,c in self.clusters.items() if c.get("meta",{}).get("is_burning")]
+        if not burning:
+            weather.firestorm_active = False
+            return
+
+        water_clusters = [(pos,c) for pos,c in self.clusters.items() if c.get("real_item") in water_items]
+
+        def extinguished_by_water(pos):
+            for wpos,wcl in water_clusters:
+                radius = wcl.get("qty", 0) / 2.0
+                if radius > 0 and math.hypot(pos[0]-wpos[0], pos[1]-wpos[1]) <= radius:
+                    return True
+            return False
+
+        def convert_to_ash(pos):
+            if pos not in self.clusters:
+                return
+            self.clusters[pos] = {
+                "name": "💨 Ash Pile", "real_item": "ash", "category": "material",
+                "is_identified": True, "inspection_attempts": 0,
+                "pos": [pos[0], pos[1]], "qty": max(1, int(self.clusters[pos].get("qty", 1))),
+                "meta": {"regrows": False, "hazard_key": None, "is_ash": True}
+            }
+
+        new_ignites = []
+        to_ash = []
+        for pos in burning:
+            if extinguished_by_water(pos):
+                to_ash.append(pos)
+                continue
+            if random.random() < 0.20:
+                to_ash.append(pos)
+                continue
+            if random.random() >= 0.60:
+                continue
+
+            candidates = []
+            for qpos,qcl in self.clusters.items():
+                if qpos == pos: continue
+                if qcl.get("meta",{}).get("is_burning"): continue
+                if qcl.get("real_item") in ("ash", "fire") or qcl.get("real_item") in water_items:
+                    continue
+                if math.hypot(qpos[0]-pos[0], qpos[1]-pos[1]) > 3:
+                    continue
+                candidates.append(qpos)
+            if not candidates:
+                continue
+
+            target = random.choice(candidates)
+            if extinguished_by_water(target):
+                to_ash.append(target)
+            else:
+                new_ignites.append(target)
+
+        for pos in set(to_ash):
+            convert_to_ash(pos)
+        for pos in set(new_ignites):
+            if pos in self.clusters and not self.clusters[pos].get("meta",{}).get("is_burning"):
+                self.clusters[pos] = {
+                    "name": "🔥 Fire", "real_item": "fire", "category": "hazard",
+                    "is_identified": True, "inspection_attempts": 0,
+                    "pos": [pos[0], pos[1]], "qty": 1,
+                    "meta": {"regrows": False, "hazard_key": None, "is_burning": True}
+                }
+
+        if not any(c.get("meta",{}).get("is_burning") for c in self.clusters.values()):
+            weather.firestorm_active = False
 
     def spawn_animals(self, player):
         now = time.time()
@@ -2894,16 +3352,18 @@ class World:
             max_count = 3 if atype == "grot" else 2
             if counts.get(atype,0) >= max_count: continue
             if atype == "grot":
-                if player.hidden_xp < 20:
+                if player.hidden_xp < 10:
                     continue
                 if player.hidden_xp < 40:
-                    grot_chance = 0.005
+                    grot_chance = 0.04
                 elif player.hidden_xp < 100:
-                    grot_chance = 0.01
+                    grot_chance = 0.08
                 elif player.hidden_xp < 140:
-                    grot_chance = 0.015
+                    grot_chance = 0.12
                 else:
-                    grot_chance = 0.02
+                    grot_chance = 0.16
+                if getattr(player, 'mode', 'quest') in ("combat", "explorer_combat"):
+                    grot_chance = min(0.95, grot_chance * 2.0)
                 if random.random() > grot_chance:
                     continue
             elif random.random() > adef["spawn_rate"]:
@@ -2916,7 +3376,12 @@ class World:
             gy = player.y + r * math.sin(angle)
             grot_stats_data = None
             if atype == "grot":
-                grot_stats_data = grot_stats(player.hidden_xp, grace=not player.grace_period_over)
+                # In 'combat' mode, remove the grace period so grots are always full-strength
+                if getattr(player, 'mode', 'quest') in ('combat', 'explorer_combat'):
+                    grace_flag = False
+                else:
+                    grace_flag = not player.grace_period_over
+                grot_stats_data = grot_stats(player.hidden_xp, grace=grace_flag)
             for _ in range(group_size):
                 ax = gx + random.uniform(-2, 2)
                 ay = gy + random.uniform(-2, 2)
@@ -2974,6 +3439,67 @@ class World:
             speed_cpm = a.get("speed_cpm", adef.get("speed_cpm", 10))
             real_speed = speed_cpm * dt / 30.0
             dist_to_player = math.hypot(a["x"]-player.x, a["y"]-player.y)
+            # Grots: aggressor behavior — approach player, flee at 50% HP in small groups
+            if a["type"] == "grot":
+                nearby_grots = sum(1 for b in self.animals if b["type"] == "grot" and math.hypot(b["x"]-a["x"],b["y"]-a["y"]) <= 5)
+                max_hp = a.get("max_hp", 5)
+                # Small group (<= 3): flee at half HP; Large group: always fight
+                if nearby_grots <= 3 and a["hp"] <= max_hp * 0.5:
+                    a["fleeing"] = True
+                # Grots may hunt nearby prey if it is closer than the player
+                if not a.get("fleeing"):
+                    prey = None
+                    prey_dist = float('inf')
+                    for b in self.animals:
+                        if b is a or b["type"] == "grot":
+                            continue
+                        pd = math.hypot(b["x"]-a["x"], b["y"]-a["y"])
+                        if pd <= 6.0 and pd < prey_dist:
+                            prey = b
+                            prey_dist = pd
+                    if prey and prey_dist > 0.5 and prey_dist < dist_to_player:
+                        dx = (prey["x"] - a["x"]) / prey_dist
+                        dy = (prey["y"] - a["y"]) / prey_dist
+                        a["x"] += dx * real_speed
+                        a["y"] += dy * real_speed
+                        continue
+                # Grots may hunt nearby prey if it is closer than the player
+                if not a.get("fleeing"):
+                    prey = None
+                    prey_dist = float('inf')
+                    for b in self.animals:
+                        if b is a or b.get("type") == "grot":
+                            continue
+                        pd = math.hypot(b["x"]-a["x"], b["y"]-a["y"])
+                        if pd <= 6.0 and pd < prey_dist:
+                            prey = b
+                            prey_dist = pd
+                    if prey and prey_dist > 0.5 and prey_dist < dist_to_player:
+                        dx = (prey["x"] - a["x"]) / prey_dist
+                        dy = (prey["y"] - a["y"]) / prey_dist
+                        a["x"] += dx * real_speed
+                        a["y"] += dy * real_speed
+                        continue
+                # Grots approach player if within vision range
+                vm = a.get("vision_max", adef.get("vision_max", 10))
+                if dist_to_player < vm and not a.get("fleeing") and dist_to_player > 0.5:
+                    # Move TOWARD player
+                    dx = (player.x - a["x"]) / dist_to_player
+                    dy = (player.y - a["y"]) / dist_to_player
+                    a["x"] += dx * real_speed
+                    a["y"] += dy * real_speed
+                elif a.get("fleeing"):
+                    if dist_to_player > FOG_RADIUS * 2:
+                        to_remove.append(i); continue
+                    if dist_to_player > 0.1:
+                        dx = (a["x"]-player.x)/dist_to_player
+                        dy = (a["y"]-player.y)/dist_to_player
+                        a["x"] += dx * real_speed
+                        a["y"] += dy * real_speed
+                else:
+                    a["x"] += random.uniform(-1,1) * real_speed * 0.1
+                    a["y"] += random.uniform(-1,1) * real_speed * 0.1
+                continue  # Skip the generic flee/wander logic below for grots
             if not a.get("fleeing"):
                 vm = a.get("vision_max", adef.get("vision_max", 5))
                 vp = a.get("vision_peak", adef.get("vision_peak", 3))
@@ -3053,10 +3579,25 @@ class World:
                     if random.random() > survival_rate:
                         animals_to_remove.append(animal)
         
-        # Remove dead animals
+        # Remove dead animals — drop meat/loot on the ground
         for animal in animals_to_remove:
             try:
                 self.animals.remove(animal)
+                loot = ANIMAL_DEFS.get(animal.get('type',''), {}).get('loot', {})
+                meat_qty = loot.get('meat', 0) + loot.get('bone', 0) // 2
+                if meat_qty > 0:
+                    drop_x = int(round(animal['x'])); drop_y = int(round(animal['y']))
+                    drop_pos = (drop_x, drop_y)
+                    existing = self.clusters.get(drop_pos)
+                    if existing and existing.get('real_item') in ('meat', 'raw_game'):
+                        existing['qty'] = existing.get('qty', 0) + meat_qty
+                    else:
+                        self.clusters[drop_pos] = {
+                            'name': 'Raw Game', 'real_item': 'meat', 'category': 'food',
+                            'is_identified': True, 'inspection_attempts': 0,
+                            'pos': [drop_x, drop_y], 'qty': meat_qty,
+                            'meta': {'item': 'meat', 'regrows': False}
+                        }
             except ValueError:
                 pass
 
@@ -3241,6 +3782,7 @@ def animal_retaliation(player, world, target, msg):
                 player.wearing = None
                 player.armor_dur = 0
                 msg.append("💥 Armor broke!")
+        player.note_damage_cause(f"{target['type'].replace('_',' ').title()} attack")
         player.health = max(0, player.health - dmg)
         msg.append(f"⚔️ {target['type'].replace('_',' ').title()} fights back! -{dmg} HP")
     elif target.get("atk", 0) > 0:
@@ -3299,7 +3841,18 @@ def start_turn_based_combat(player, world, attackers, msg):
     player.in_combat = True
     msg.append(f"⚔️ Turn-based combat started! You face {len(enemies)} enemy(ies). AP per player segment: 5.\nYou will act {'first' if player_first else 'after enemies'}; player segments: {player_turns}, enemy segments: {enemy_segments}.")
     # Brief user-facing combat help (commands and short effects)
-    msg.append("🛈 Combat commands: a/attack/s/strike — Strike (cost 3 AP). t/throw — Throw (cost 5 AP). block — Brace to block (cost 3 AP). flee — Attempt to flee (cost 2 AP, grants 10s safe window but enemies may hit once). pass/end — End your segment and let enemies act. status — Show combat status.")
+    msg.append("🛈 Combat commands: a/attack/s/strike — Strike (cost 3 AP). t/throw — Throw (cost 5 AP). block — Brace to block (cost 3 AP). flee — Attempt to flee (cost 2 AP, grants 5s safe window but enemies may hit once). pass/end — End your segment and let enemies act. status — Show combat status.")
+    if not player_first:
+        msg.append("⚔️ Enemies strike first!")
+        for seg in range(enemy_segments):
+            for e in enemies:
+                if e["hp"] <= 0:
+                    continue
+                _enemy_attack_player(player, e, msg)
+                if player.health <= 0:
+                    break
+            if player.health <= 0:
+                break
 
 
 def _enemy_attack_player(player, enemy, msg):
@@ -3328,6 +3881,7 @@ def _enemy_attack_player(player, enemy, msg):
                 player.wearing = None
                 player.armor_dur = 0
                 msg.append("💥 Armor broke!")
+        player.note_damage_cause(f"{enemy.get('type').replace('_',' ').title()} attack")
         player.health = max(0, player.health - final)
         msg.append(f"💥 {enemy.get('type').replace('_',' ').title()} hits you -{final} HP")
 
@@ -3335,6 +3889,8 @@ def _enemy_attack_player(player, enemy, msg):
 def handle_combat_command(player, world, act, arg, msg):
     """Process player commands while in combat. Returns True if command handled."""
     if not player.in_combat or not player.combat:
+        return False
+    if act in ("pause","resume","help"):
         return False
     state = player.combat
     enemies = state["enemies"]
@@ -3474,7 +4030,7 @@ def handle_combat_command(player, world, act, arg, msg):
         state["player_ap"] -= 2
         player.in_combat = False
         player.combat = None
-        player.flee_until = time.time() + 10.0
+        player.flee_until = time.time() + 5.0
         # enemies have 50% chance to hit once
         for e in live:
             if random.random() < 0.5:
@@ -3630,7 +4186,7 @@ def do_save(player, world, save_path, biome, dead=False, death_reason="", paused
             "last_played": time.time(),
             "health": player.health,
             "coins": player.coins,
-            "total_playtime": player.total_playtime,
+            "total_playtime": player.total_playtime + max(0.0, time.time() - player.session_start),
             "points": player.points,
             "dead": dead,
             "death_reason": death_reason,
@@ -3852,6 +4408,30 @@ def pick_save():
         print("  ⚠️  Invalid choice. Enter 1 or 2.")
 
     print()
+    print("  🥊 COMBAT SETTING:")
+    print("  1. Normal — standard encounters.")
+    print("  2. Combat — doubled monster spawn (more dangerous).")
+    chosen_combat = "normal"
+    while True:
+        try:
+            raw_combat = input("  Choose combat setting [1/2]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(0)
+        if raw_combat == "1":
+            chosen_combat = "normal"
+            break
+        if raw_combat == "2":
+            chosen_combat = "combat"
+            break
+        print("  ⚠️  Invalid choice. Enter 1 or 2.")
+
+    if chosen_combat == "combat":
+        if chosen_mode == "quest":
+            chosen_mode = "combat"
+        else:
+            chosen_mode = "explorer_combat"
+
+    print()
     return path, chosen_biome, True, chosen_mode
 
 
@@ -3866,7 +4446,9 @@ def main():
     try:
         save_path, biome, is_new, chosen_mode = pick_save()
         term = Terminal()
-        termios.tcflush(term.fd, termios.TCIFLUSH); term.setup()
+        if not term.using_windows_fallback:
+            termios.tcflush(term.fd, termios.TCIFLUSH)
+        term.setup()
         if is_new:
             run_tutorial(term)
         print("🚀 Preparing world..."); sys.stdout.flush()
@@ -3881,17 +4463,8 @@ def main():
             sound.play_intro()
             sound.play_environment(world.biome)
         weather = WeatherSystem()
-        if player.mode == "quest":
-            msg = ["🎮 Quest Mode active. Follow the old man's goals or type 'quests' to review them."]
-        else:
-            msg = ["🎮 Explorer Mode active. Quests are disabled and you can roam freely."]
-
-        def _exit_handler(signum, frame):
-            raise KeyboardInterrupt
-        signal.signal(signal.SIGINT, _exit_handler)
-        signal.signal(signal.SIGTERM, _exit_handler)
-        signal.signal(signal.SIGHUP, _exit_handler)
-
+        
+        # Load save file before update_quests to preserve quest states
         if not is_new:
             try:
                 with open(save_path) as f: data = json.load(f)
@@ -3908,9 +4481,33 @@ def main():
                 world.animals = data.get("world", {}).get("animals", [])
                 for a in world.animals:
                     a["last_move"] = time.time()
+                # Fix active_tasks end times: if task end is in the past, keep 1s left
+                now_load = time.time()
+                for t in player.active_tasks:
+                    if t.get("end", 0) < now_load:
+                        t["end"] = now_load + 1.0
                 print("✅ Save loaded.")
             except Exception as e:
                 print(f"⚠️  Load failed ({e}). Starting fresh."); is_new = True
+        
+        if player.mode == "quest":
+            msg = ["🎮 Quest Mode active. Follow the old man's goals or type 'quests' to review them."]
+        elif player.mode == "combat":
+            msg = ["🎮 Combat Mode active. Quest Mode with doubled monster spawn — good luck!"]
+        elif player.mode == "explorer_combat":
+            msg = ["🎮 Explorer Combat Mode active. Quests are disabled and monster spawn is higher."]
+        else:
+            msg = ["🎮 Explorer Mode active. Quests are disabled and you can roam freely."]
+
+        update_quests(player, weather, world, msg, term)
+
+        def _exit_handler(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGINT, _exit_handler)
+        if hasattr(signal, 'SIGTERM'):
+            signal.signal(signal.SIGTERM, _exit_handler)
+        if hasattr(signal, 'SIGHUP'):
+            signal.signal(signal.SIGHUP, _exit_handler)
     except Exception as e:
         print(f"\n❌ Setup failed: {e}"); return
 
@@ -3935,13 +4532,13 @@ def main():
         has_axe     = player.inventory.get("axe", 0) > 0
         has_pick    = player.inventory.get("pickaxe", 0) > 0
         hdr = [
-            f"{'🌙 NIGHT' if player.time_of_day=='night' else '☀️ DAY'} | 📍@({player.x},{player.y}) | {'🌲 Forest' if biome_at(player.x,player.y)=='Forest' else '❄️ Arctic'} | 🧭{int(dist_to_border(player.x,player.y)):+d}",
+            f"{'🌙 NIGHT' if player.time_of_day=='night' else '☀️ DAY'} | 📍@({player.x},{player.y}) | {'🌲 Forest' if biome_at(player.x,player.y)=='Forest' else '❄️ Arctic'} | 🧭{'↗️' if dist_to_border(player.x,player.y)>0 else '↙️'}{abs(int(dist_to_border(player.x,player.y)))}",
             f"❤️{player.health:.0f} | 🍽️{player.hunger:.0f} | 💧{player.thirst:.0f} | ⚡{int(player.energy)} | 😴{int(player.fatigue)}",
-            f"🪙{player.coins:.0f} | 📚{player.inventory.get('textbook',0)} | {weather.current.upper()} | 🏆{int(player.points)}pts | {_temp_label(player.temp)}"
+            f"🪙{player.coins:.0f} | 📚{player.inventory.get('textbook',0)} | {(weather.current if biome_at(player.x,player.y)=='Arctic' else ('☀️ CLEAR' if any(w in weather.current.upper() for w in ('ARCTIC', 'BLIZZARD', 'SNOW STORM', 'SNOWSTORM')) else weather.current)).upper()} | 🏆{int(player.points)}pts | {_temp_label(player.temp)}"
         ]
         # Tool durabilities on line 2
         if has_adv_axe and player.axe_dur > 0:
-            hdr[1] += f" | ⚔️{int((max(0,player.axe_dur)/TOOL_DUR_ADV)*100)}%"
+            hdr[1] += f" | 🪓{int((max(0,player.axe_dur)/TOOL_DUR_ADV)*100)}%"
         elif has_axe and player.axe_dur > 0:
             hdr[1] += f" | 🪓{int((max(0,player.axe_dur)/TOOL_DUR)*100)}%"
         if has_pick and player.pickaxe_dur > 0:
@@ -3964,15 +4561,36 @@ def main():
             hdr[1] += f" | 🗡️{int(max(0,player.spear_dur)/sdef_h.get('dur',100)*100)}%"
         if player.on_fire:
             hdr[2] += " | 🔥 ON FIRE!"
+        if player.in_combat and player.combat:
+            state = player.combat
+            scan = [f"  ⚔️ COMBAT MODE — HP {int(player.health)}/{int(player.max_health)} | AP {state['player_ap']} | Segments {state['player_turns']} | {'Blocking' if state.get('blocking') else 'Ready'}"]
+            scan.append("  Enemies:")
+            for e in state['enemies']:
+                status = "DEFEATED" if e['hp'] <= 0 else f"HP:{e['hp']} ATK:{e['atk']} DEF:{e['def']}"
+                scan.append(f"   - {e['type'].replace('_',' ').title():<18} | {status}")
+            scan.append("")
+            scan.append("  Commands: a/attack, t/throw, block, flee, pass, status, pause")
+            term.render_main(hdr, scan, msg, "Combat> ", buf, player, paused)
+            return
         # Station HP line
         st_parts = []
         for st, hp in player.station_hp.items():
             if player.inventory.get(st, 0) > 0 and hp > 0:
-                icon = "⚒️" if "woodworking" in st else ("🪡" if "sewing" in st else ("🔥" if "furnace" in st else ("⚗️" if "smelter" in st else "💧")))
-                short = st.replace("_station","").replace("_"," ").title()[:8]
+                if "woodworking" in st: icon, short = "⚒️", "Woodwork"
+                elif "sewing" in st: icon, short = "🪡", "Sewing"
+                elif "furnace" in st: icon, short = "🔥", "Furnace"
+                elif "smelter" in st: icon, short = "⚗️", "Smelter"
+                elif "water_filter" in st: icon, short = "💧", "WaterFlt"
+                elif "liquifier" in st: icon, short = "🧪", "Liquifier"
+                else: icon, short = "🏭", st.replace("_"," ").title()[:8]
                 st_parts.append(f"{icon}{short}:{int(hp)}min")
         if st_parts:
-            hdr.append("🏭 " + " | ".join(st_parts))
+            st_line = "🏭 " + " | ".join(st_parts)
+            try:
+                cols, _ = os.get_terminal_size()
+            except:
+                cols = TERM_WIDTH
+            hdr.extend(vwrap(st_line, cols))
         cluster_scan = []
         # Build set of animal positions to allow overriding clusters
         animal_positions = set()
@@ -3992,11 +4610,13 @@ def main():
             else:
                 ic = "  "
             if c.get("is_identified"):
-                col2 = c.get("real_item","").replace("_"," ").title()
+                col2 = display_item_name(c.get("real_item", ""))
             else:
-                col2 = UNKNOWN_DISPLAY_MAP.get(UNKNOWN_CATEGORY_MAP.get(c.get("real_item",""),""), "❓ Unknown")
+                col2 = UNKNOWN_DISPLAY_MAP.get(UNKNOWN_CATEGORY_MAP.get(c.get("real_item", ""), ""), "❓ Unknown")
             # Burning clusters: show 🔥 FIRE during firestorm, 💨 Ash after
-            if c.get("meta",{}).get("is_ash"):
+            if c.get("meta",{}).get("is_burning"):
+                display_name = "🔥 Fire"
+            elif c.get("meta",{}).get("is_ash"):
                 display_name = "🔥 FIRE" if weather.firestorm_active else "💨 Ash Pile"
             else:
                 display_name = c['name']
@@ -4004,7 +4624,8 @@ def main():
             name_col = vfit(display_name, 27)
             type_col = vfit(col2, 19)
             qty_s    = str(c['qty']).ljust(3)
-            cluster_scan.append(f"  {ic} {name_col} | {type_col} | {qty_s} | {m:<5} | @({c['pos'][0]},{c['pos'][1]})")
+            coord_str = f"@({c['pos'][0]},{c['pos'][1]})"
+            cluster_scan.append(f"  {ic} {name_col} | {type_col} | {qty_s} | {m:<5} | {coord_str}")
         animal_scan = []
         nearby_animals = []
         for a in world.animals:
@@ -4016,15 +4637,19 @@ def main():
             counts = {}
             for _, a in nearby_animals:
                 counts[a['type']] = counts.get(a['type'], 0) + 1
-            summary = ", ".join(f"{counts[t]} {t.replace('_',' ')}" for t in sorted(counts, key=lambda k: (-counts[k], k)))
+            summary = ", ".join(f"{counts[t]} {t.replace('_',' ').title()}" for t in sorted(counts, key=lambda k: (-counts[k], k)))
             animal_scan.append(f"  🐾 Nearby wildlife: {summary}")
             for d_a, a in nearby_animals[:4]:
                 adef_s = ANIMAL_DEFS.get(a["type"], {})
                 icon_s = adef_s.get("icon", "❓")
                 state_s = "🏃 fleeing" if a.get("fleeing") else "🌿 nearby"
-                animal_scan.append(f"  🐾 {icon_s} {a['type'].replace('_',' ').title():<18} | {state_s:<12} | {d_a:.1f} tiles | HP:{a['hp']} | @({a['x']:.0f},{a['y']:.0f})")
-        scan = animal_scan + cluster_scan
-        if not scan: scan = ["  🔍 Nothing nearby."]
+                atype_label = a["type"].replace("_"," ").title()
+                if a["type"] == "grot":
+                    icon_s = "👹"
+                animal_scan.append(f"  {icon_s} {atype_label:<18} | {state_s:<12} | {d_a:.1f} tiles | HP:{a['hp']} | @({a['x']:.0f},{a['y']:.0f})")
+        scan_header = [f"  {'WHAT IT IS':<30} {'WHAT YOU GET':<21} {'AMT':<4} {'DIST':<6} COORDINATES"]
+        scan = animal_scan + scan_header + cluster_scan
+        if not cluster_scan and not animal_scan: scan = ["  🔍 Nothing nearby."]
         term.render_main(hdr, scan, msg, "> ", buf, player, paused)
 
     def flash_damage():
@@ -4037,6 +4662,10 @@ def main():
             if not paused:
                 res = player.update_passive()
                 unlocked = was_crafting and not player.active_tasks
+                if res not in ("dead",) and not player.in_combat:
+                    hostile_nearby = [a for a in world.animals if a.get("atk",0) > 0 and math.hypot(a["x"]-player.x, a["y"]-player.y) <= 1.0]
+                    if hostile_nearby and time.time() > player.flee_until:
+                        start_turn_based_combat(player, world, hostile_nearby, msg)
                 if res == "time_shift":
                     icon = "🌙" if player.time_of_day == "night" else "☀️"
                     label = "NIGHT" if player.time_of_day == "night" else "DAY"
@@ -4044,7 +4673,7 @@ def main():
                     world.time_of_day = player.time_of_day
                     if player.time_of_day == "day":
                         player.days_survived += 1
-                        player.hidden_xp += 30
+                        player.hidden_xp += 50
                         if not player.grace_period_over and player.days_survived >= 1:
                             player.grace_period_over = True
                     # Daily world events
@@ -4055,9 +4684,27 @@ def main():
                     msg = msg[-3:]
                 elif res and res != "dead" and not res.startswith("✅ Finished"):
                     msg.append(res); msg = msg[-3:]
+                # Flash red on starvation or dehydration tick
+                if getattr(player, '_starvation_flash', False):
+                    player._starvation_flash = False
+                    msg.append("🍽️ STARVATION! -10 HP from hunger!"); msg = msg[-3:]
+                    refresh(); term.flash_red()
+                if getattr(player, '_thirst_flash', False):
+                    player._thirst_flash = False
+                    msg.append("💧 DEHYDRATING! Taking damage from thirst!"); msg = msg[-3:]
+                    refresh(); term.flash_red()
+                # Frostberry thaw message
+                if getattr(player, '_frostberry_thaw_msg', 0):
+                    qty = player._frostberry_thaw_msg; player._frostberry_thaw_msg = 0
+                    msg.append(f"🌡️ Warmth thawed {qty} frostberries into wild berries!"); msg = msg[-3:]
+                # Freezing water thaw message
+                if getattr(player, '_freezing_water_thaw_msg', 0):
+                    qty = player._freezing_water_thaw_msg; player._freezing_water_thaw_msg = 0
+                    msg.append(f"💧 Warmth melted {qty} freezing water into fresh water!"); msg = msg[-3:]
                 if unlocked:
                     msg.append("🔓 Movement unlocked. Arrow keys are active again."); msg = msg[-3:]
                 world.regen()
+                world.update_fire(weather, player)
                 now = time.time()
 
                 # Water evaporation: every 30s without rain
@@ -4087,6 +4734,46 @@ def main():
                 # On-fire periodic warning
                 if player.on_fire and int(now) % 4 == 0:
                     msg.append("🔥 YOU'RE ON FIRE! -5 HP/sec — move to water!"); msg = msg[-3:]
+
+                # Stat warnings — low/critical health, hunger, thirst, fatigue
+                if not hasattr(player, '_last_stat_warn'): player._last_stat_warn = 0.0
+                if not hasattr(player, '_last_nutrition_warn'): player._last_nutrition_warn = 0.0
+                if now - player._last_stat_warn >= 8.0:
+                    player._last_stat_warn = now
+                    # Health warnings
+                    if player.health < 10:
+                        msg.append("💀 CRITICAL HEALTH! Use bandages or rest immediately!"); msg = msg[-3:]
+                        refresh(); term.flash_red()
+                    elif player.health < 30:
+                        msg.append("❤️ Very low health! Consider bandaging or resting."); msg = msg[-3:]
+                    elif player.health < 50:
+                        msg.append("❤️ Low health. Watch out!"); msg = msg[-3:]
+                    # Fatigue warnings
+                    if player.fatigue < 10:
+                        msg.append("😴 Very low fatigue! Can't gather or craft. Rest now!"); msg = msg[-3:]
+                if now - player._last_nutrition_warn >= 30.0:
+                    player._last_nutrition_warn = now
+                    # Hunger warnings
+                    if player.hunger < 10:
+                        msg.append("🍽️ CRITICAL HUNGER! Starving — eat NOW or lose HP!"); msg = msg[-3:]
+                        refresh(); term.flash_red()
+                    elif player.hunger < 30:
+                        msg.append("🍽️ Very low hunger! Eat soon."); msg = msg[-3:]
+                    elif player.hunger < 50:
+                        msg.append("🍽️ Low hunger. Find food."); msg = msg[-3:]
+                    # Thirst warnings
+                    if player.thirst < 10:
+                        msg.append("💧 CRITICAL THIRST! Dehydrating — drink water NOW!"); msg = msg[-3:]
+                        refresh(); term.flash_red()
+                    elif player.thirst < 30:
+                        msg.append("💧 Very low thirst! Drink soon."); msg = msg[-3:]
+                    elif player.thirst < 50:
+                        msg.append("💧 Low thirst. Find water."); msg = msg[-3:]
+                if player.health < 30 and not paused:
+                    if not hasattr(player, '_last_low_hp_flash'): player._last_low_hp_flash = 0.0
+                    if now - player._last_low_hp_flash >= 5.0:
+                        player._last_low_hp_flash = now
+                        refresh(); term.flash_red()
 
                 # Achievement checks every 5 seconds
                 if not hasattr(player, '_last_ach_check'): player._last_ach_check = 0.0
@@ -4142,7 +4829,7 @@ def main():
                 elif player.resting and player.rest_mode == "floor":
                     death_reason = "Perished while resting on the cold ground"
                 else:
-                    death_reason = "Fatal injuries"
+                    death_reason = player.last_damage_cause or "Fatal injuries"
                 player_died = True
                 if sound and sound.enabled:
                     sound.play_death()
@@ -4161,13 +4848,15 @@ def main():
             key = term.get_key() if not step_msg else None
             if player.auto_walk_target and key is not None:
                 player.auto_walk_target = None
-                msg.append("⚠️ Auto-walk cancelled."); msg = msg[-3:]
+            if player.in_combat and player.auto_walk_target:
+                player.auto_walk_target = None
+                rn = True
 
-            # ---- MOVEMENT (blocked while crafting) ----
-            if key in ['UP','DOWN','LEFT','RIGHT'] and not paused:
+            # ---- MOVEMENT (blocked while crafting and combat) ----
+            if key in ['UP','DOWN','LEFT','RIGHT'] and not paused and not player.in_combat:
                 if player.resting: player.resting = False; player.rest_mode = None
                 if player.active_tasks:
-                    msg.append("🔨 Can't move while crafting! Wait for it to finish."); msg = msg[-3:]; rn = True
+                    msg.append("🔨 Can't move while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; rn = True
                 else:
                     dx = 1 if key=='RIGHT' else -1 if key=='LEFT' else 0
                     dy = 1 if key=='UP' else -1 if key=='DOWN' else 0
@@ -4204,6 +4893,7 @@ def main():
                     handled = handle_combat_command(player, world, act, arg, msg)
                     msg = msg[-3:]
                     if handled:
+                        rn = True
                         continue
 
                 # ---- HELP ----
@@ -4231,6 +4921,8 @@ def main():
                         else:
                             paused = True
                             player.pause_started = time.time()
+                            for t in player.active_tasks:
+                                t["paused_remaining"] = max(0, int(t["end"] - player.pause_started))
                             msg.append("⏸️ Game paused. Time, weather, and auto-walk are frozen.")
                     else:
                         if not paused:
@@ -4243,12 +4935,16 @@ def main():
                             player.last_passive = now
                             player.last_day = now
                             player.last_weather_check = now
+                            # Accumulate playtime from before the pause, then reset
+                            if player.pause_started and player.session_start < player.pause_started:
+                                player.total_playtime += player.pause_started - player.session_start
                             player.session_start = now
                             if player.resting and player.rest_last > 0:
                                 player.rest_last = now
                             if player.pause_started and pause_duration > 0:
                                 for t in player.active_tasks:
                                     t["end"] += pause_duration
+                                    t.pop("paused_remaining", None)
                                 if player.detour_until > 0:
                                     player.detour_until += pause_duration
                             player.pause_started = 0.0
@@ -4266,9 +4962,30 @@ def main():
                 # ---- INVENTORY ----
                 elif act in ("inv","inventory"):
                     out = ["🎒 INVENTORY", "─"*TERM_WIDTH]
+                    # Collect regular inventory items for grid layout
+                    items_grid = []
                     for k,v in sorted(player.inventory.items()):
                         if k.startswith("unknown_"): continue
-                        if isinstance(v,int) and v > 0: out.append(f"  {display_item_name(k)}: {v}")
+                        if isinstance(v,int) and v > 0:
+                            items_grid.append((display_item_name(k), str(v)))
+                    
+                    # Layout items in grid columns (3 columns for wider terminals)
+                    if items_grid:
+                        # Calculate column width to fit 3 items per row if space allows
+                        available_width = TERM_WIDTH - 4  # Account for padding
+                        col_width = max(25, available_width // 3)
+                        col_width = min(col_width, 40)  # Cap at 40 to prevent too-wide columns
+                        cols_per_row = max(1, available_width // (col_width + 1))
+                        
+                        for i in range(0, len(items_grid), cols_per_row):
+                            row_items = items_grid[i:i+cols_per_row]
+                            row_str = "  "
+                            for name, qty in row_items:
+                                item_str = f"{name}: {qty}"
+                                row_str += item_str.ljust(col_width) + "  "
+                            out.append(row_str.rstrip())
+                    
+                    # Unknown items (unchanged)
                     for k,v in sorted(player.inventory.items()):
                         if not k.startswith("unknown_") or not isinstance(v,dict): continue
                         if v.get("qty",0) > 0:
@@ -4289,15 +5006,40 @@ def main():
                         out.append(f"  🧊 Total insulation: {total_ins} — {status}")
                     if player.wearing_pants and player.wearing_shirt:
                         out.append(f"  ⚠️ Full clothing: Extra heat-sensitive during firestorms!")
+                    # Tools / Weapons durability
+                    tools_info = []
+                    if player.inventory.get("advanced_axe", 0) > 0:
+                        tools_info.append(f"    🪓 Advanced Axe              {int(max(0,player.axe_dur))}/{TOOL_DUR_ADV}  ({int(max(0,player.axe_dur)/TOOL_DUR_ADV*100)}%)")
+                    elif player.inventory.get("axe", 0) > 0:
+                        tools_info.append(f"    🪓 Axe                       {int(max(0,player.axe_dur))}/{TOOL_DUR}  ({int(max(0,player.axe_dur)/TOOL_DUR*100)}%)")
+                    if player.inventory.get("pickaxe", 0) > 0:
+                        tools_info.append(f"    ⛏️ Pickaxe                   {int(max(0,player.pickaxe_dur))}/{TOOL_DUR}  ({int(max(0,player.pickaxe_dur)/TOOL_DUR*100)}%)")
+                    if player.spear_type and player.inventory.get(player.spear_type, 0) > 0 and player.spear_dur > 0:
+                        sdef_h = SPEAR_DEFS.get(player.spear_type, {})
+                        tools_info.append(f"    🗡️ {player.spear_type.replace('_',' ').title():<24} {int(max(0,player.spear_dur))}/{sdef_h.get('dur',100)}  ({int(max(0,player.spear_dur)/max(1,sdef_h.get('dur',100))*100)}%)")
+                    if player.wearing and player.armor_dur > 0:
+                        armor_max = 1800 if player.wearing == "heavy_armor" else (1000 if player.wearing == "medium_armor" else 500)
+                        armor_pct = int((player.armor_dur / armor_max) * 100)
+                        tools_info.append(f"    🛡️ {player.wearing.replace('_',' ').title():<24} {int(player.armor_dur)} dur ({armor_pct}%)")
+                    if tools_info:
+                        out.append(""); out.append("  🔧 TOOLS / WEAPONS:")
+                        out.extend(tools_info)
                     # Station HP
                     st_info = [(st, hp) for st, hp in player.station_hp.items() if player.inventory.get(st, 0) > 0]
                     if st_info:
-                        out.append(""); out.append("  🏭 STATIONS:")
+                        out.append(""); out.append("  🏭 STATIONS (all):")
                         for st, hp in st_info:
                             pct = int(max(0, hp) / STATION_MAX_HP * 100)
                             out.append(f"    {st.replace('_',' ').title():<28} {int(hp):.0f}/{int(STATION_MAX_HP)} GWM  ({pct}%)")
-                    term.print_page(out)
-
+                    LINES_PER_PAGE = 20
+                    if len(out) <= LINES_PER_PAGE:
+                        term.print_page(out)
+                    else:
+                        pages = [out[i:i+LINES_PER_PAGE] for i in range(0, len(out), LINES_PER_PAGE)]
+                        for pi, page in enumerate(pages):
+                            page_hdr = [f"🎒 INVENTORY — page {pi+1}/{len(pages)}"] if pi > 0 else []
+                            term.print_page(page_hdr + page)
+                        
                 # ---- EXPLAIN ----
                 elif act == "explain" and arg:
                     target = arg.lower()
@@ -4361,7 +5103,7 @@ def main():
                 elif act == "recipes":
                     cats = {
                         "1. 🍳 Furnace":    ["thin_cut_meat","roasted_berry","cooked_berry","roasted_spotted_mushroom","cooked_shimmer_frostberry","roasted_meat","herbal_tea","chunky_stew","stuffed_thin_meat","thick_cut_meat","stuffed_mushroom","stuffed_thin_meat_berries","stuffed_thin_meat_honey","stuffed_thin_meat_meat","fresh_water","dirty_water","jerky","moss_salve","antidote_tea","frost_tonic","glowing_jam","honey_root_tea"],
-                        "2. 🪵 Woodworking":["woodworking_station","sewing_station","axe","advanced_axe","pickaxe","plank","fabric","water_filter","liquifier","butchering","necroplastic","compressed_fuel","ash_poultice"],
+                        "2. 🪵 Woodworking":["woodworking_station","sewing_station","axe","advanced_axe","pickaxe","plank","fabric","water_filter","liquifier","necroplastic","compressed_fuel","ash_poultice"],
                         "3. 🧵 Sewing":     ["trap","poison_trap","very_strong_fabric","bandages","light_armor","pants","shirt","medium_pants","medium_shirt","heavy_pants","heavy_shirt","insulated_wrap"],
                         "4. 🔥 Smelting":   ["honey","beeswax","oil","plastic","copper","iron","gold","steel"],
                         "5. 🏭 Stations":    ["woodworking_station","sewing_station","furnace","smelter","water_filter","liquifier"],
@@ -4391,16 +5133,15 @@ def main():
                                     st = r.get("station","—") or "—"
                                     if isinstance(st,list): st = "+".join(s.replace("_"," ") for s in st)
                                     elif st != "—": st = st.replace("_"," ")
-                                    name = vtrunc(n.replace("_"," ").title(), 22)
-                                    mats = vtrunc(mats, 36)
-                                    st = vtrunc(st, 18)
+                                    name = vtrunc(n.replace("_"," ").title(), 24)
+                                    mats = vtrunc(mats, 45)
+                                    st = vtrunc(st, 22)
                                     fuel = r.get("fuel")
                                     if len(out) == 2:
-                                        out.append("  Name                    | Materials                          | Station")
-                                        out.append("  " + "-" * 22 + "+" + "-" * 36 + "+" + "-" * 18)
-                                    out.append(f"  {name:<22}| {mats:<36}| {st}")
-                                    if fuel is not None:
-                                        out.append(f"  {'':22}  {'':36}  (fuel:{fuel}🪵)")
+                                        out.append("  Name                      | Materials                                     | Station               | Fuel")
+                                        out.append("  " + "-" * 24 + "+" + "-" * 45 + "+" + "-" * 22 + "+------")
+                                    fuel_s = f"{fuel}🪵" if fuel is not None else ""
+                                    out.append(f"  {name:<24}| {mats:<45}| {st:<22}| {fuel_s}")
                                 term.print_page(out); break
                     rn = True
 
@@ -4428,7 +5169,7 @@ def main():
                     if paused:
                         msg.append("⏸️ Can't inspect while paused. Resume first."); msg = msg[-3:]; continue
                     if player.active_tasks:
-                        msg.append("🔨 Can't inspect while crafting! Wait for it to finish."); msg = msg[-3:]; continue
+                        msg.append("🔨 Can't inspect while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; continue
                     if arg:
                         handled = do_inspect_inventory(player, arg, msg, refresh)
                         if not handled:
@@ -4459,6 +5200,40 @@ def main():
                             else:
                                 msg.append("🔍 Inspecting cluster... (3 seconds)"); refresh(); time.sleep(INSPECT_TIME)
                                 ok, m = world.inspect_cluster(player, cl); msg.append(m)
+
+                # ---- FIGHT OLD_MAN ----
+                elif act == "fight" and arg.strip().replace(" ","_").lower() == "old_man":
+                    if player.quests.get("fight_old_man") == "active":
+                        # Simulate fight with old man — a tough NPC opponent
+                        player_power = player.health + player.energy
+                        old_man_hp = 150
+                        old_man_atk = 25
+                        rounds = []
+                        om_hp = old_man_hp
+                        pl_hp = player.health
+                        import random as _r
+                        while om_hp > 0 and pl_hp > 0:
+                            pl_atk = _r.randint(5, 20)
+                            if player.spear_type: pl_atk += 15
+                            om_hp -= pl_atk
+                            rounds.append(f"  You hit old man for {pl_atk} dmg (Old Man HP: {max(0,om_hp)})")
+                            if om_hp <= 0: break
+                            om_dmg = _r.randint(10, old_man_atk)
+                            pl_hp -= om_dmg
+                            rounds.append(f"  Old Man hits you for {om_dmg} dmg (Your HP: {max(0,pl_hp)})")
+                        player.health = max(1, pl_hp)  # survive with 1 HP even if lost
+                        if om_hp <= 0:
+                            player.quests["fight_old_man"] = "completed"
+                            player.points += QUESTS["fight_old_man"]["pts"]
+                            player.coins += QUESTS["fight_old_man"]["coins"]
+                            term.print_page(["⚔️ FIGHT WITH OLD MAN", "─"*40] + rounds + ["", "🏆 You WON! The old man falls back, laughing.", "🧓 Old Man: Har har har! Not bad at all!", f"✅ Quest complete! +{QUESTS['fight_old_man']['pts']} pts, +{QUESTS['fight_old_man']['coins']} coins"])
+                        else:
+                            term.print_page(["⚔️ FIGHT WITH OLD MAN", "─"*40] + rounds + ["", "💀 You LOST! The old man defeats you.", "🧓 Old Man: Har har! Not yet worthy! Try again!"])
+                    elif player.quests.get("fight_old_man") == "completed":
+                        msg.append("✅ Already fought the old man — quest complete!")
+                    else:
+                        msg.append("🧓 The old man isn't challenging you to a fight yet...")
+                    msg = msg[-3:]; continue
 
                 # ---- HUNT ----
                 elif act == "hunt":
@@ -4555,22 +5330,122 @@ def main():
                     term.print_page(out)
 
                 elif act == "quests":
-                    out = ["📝 QUESTS", "═" * TERM_WIDTH, ""]
-                    visible = [qid for qid in QUESTS if player.quests.get(qid) in ("active", "completed")]
-                    if not visible:
-                        out.append("🧓 The old man has not given any quests yet.")
+                    menu_lines = ["📝 QUESTS", "═" * TERM_WIDTH, "", "  1. Active quests", "  2. Completed quests", "", "Press 1 or 2 to view a quest list. Press Enter to cancel."]
+                    term.show_menu(menu_lines)
+                    while True:
+                        ch = term.get_key_no_flush(0.5)
+                        if not ch:
+                            continue
+                        if ch in ('\r','\n','ESC'):
+                            break
+                        if ch == '1':
+                            show_quest_screen(term, player, preface="🧓 Active quests:", status_filter="active")
+                            break
+                        if ch == '2':
+                            show_quest_screen(term, player, preface="🧓 Completed quests:", status_filter="completed")
+                            break
+                    msg.append("📝 Quest menu closed. Type 'quests' again anytime.")
+                    msg = msg[-3:]
+
+                # ---- GATHER ALL ----
+                elif act == "gather" and arg in ("all", "everything"):
+                    if paused:
+                        msg.append("⏸️ Can't gather while paused. Resume first."); msg = msg[-3:]; continue
+                    if player.active_tasks:
+                        msg.append("🔨 Can't gather while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; continue
+                    if player.fatigue <= 0:
+                        msg.append("😴 Too exhausted to gather! Type 'rest' to recover Fatigue."); continue
+                    cl = world.clusters.get((int(player.x),int(player.y)))
+                    if not cl or cl.get("qty",0) <= 0:
+                        msg.append("🔍 Nothing here to gather."); continue
+                    qty = cl["qty"]
+                    energy_cost = qty
+                    if int(player.energy) < energy_cost:
+                        msg.append(f"⚡ Need {energy_cost} energy to gather all (have {int(player.energy)})."); continue
+                    tool_req = cl["meta"].get("tool_req","")
+                    if cl["meta"].get("locked"):
+                        has_tool = player.has_axe() if tool_req == "axe" else player.inventory.get(tool_req, 0) > 0
+                        if not has_tool:
+                            article = "an" if tool_req[0] in "aeiou" else "a"
+                            msg.append(f"🔒 Need {article} {tool_req} first"); continue
+                    countdown_secs = math.ceil(qty / 2.0)
+                    msg.append(f"⏳ Gather all activated. ({countdown_secs}s)")
+                    msg = msg[-3:]
+                    refresh()
+                    countdown_end = time.time() + countdown_secs
+                    while time.time() < countdown_end:
+                        key = term.get_key()
+                        if key:
+                            if key == "ENTER":
+                                buf = ""
+                            elif key == "BACKSPACE":
+                                buf = buf[:-1]
+                            elif len(key) == 1:
+                                buf += key
+                        remaining = max(0, int(countdown_end - time.time()))
+                        msg[-1] = f"⏳ Gather all activated. {remaining}..."
+                        msg = msg[-3:]
+                        refresh()
+                        time.sleep(0.05)
+                    real = cl["real_item"]
+                    if not cl["is_identified"]:
+                        cat = UNKNOWN_CATEGORY_MAP.get(real, "misc")
+                        inv_key, inv_entry = player.get_unknown_entry(cat)
+                        inv_entry["qty"] += qty; inv_entry["items"].extend([real] * qty)
+                        inv_entry["inspect_tries"] = max(inv_entry.get("inspect_tries", 0), cl.get("inspection_attempts", 0))
+                        disp = UNKNOWN_DISPLAY_MAP.get(cat, f"❓ Unknown {cat.title()}")
+                        msg.append(f"➕ {qty} {disp}")
                     else:
-                        for qid in visible:
-                            q = QUESTS[qid]
-                            status = player.quests.get(qid, "pending")
-                            icon = "✅" if status == "completed" else "🟡"
-                            label = "Completed" if status == "completed" else "Active"
-                            out.append(f"  {icon} {label}")
-                            for wrapped in vwrap(q['desc'], TERM_WIDTH - 6):
-                                out.append("     " + wrapped)
-                            out.append("")
-                    out.append("Type 'quests' anytime to review active goals.")
-                    term.print_page(out)
+                        player.inventory[real] = player.inventory.get(real, 0) + qty
+                        msg.append(f"➕ {qty} {display_item_name(real)} (gathered all)")
+                    if real == "wood":
+                        player.wood_gathered += qty
+                        for _ in range(qty):
+                            used, brk = player.use_axe(1)
+                            if brk: msg.append(brk); break
+                    if real in BERRY_ITEMS: player.berries_gathered += qty
+                    if real in MUSHROOM_ITEMS: player.mushrooms_gathered += qty
+                    if real == "bee_hive": player.bee_hives_collected += qty
+                    if real == "spider_silk": player.spider_silk_gathered += qty
+                    if real == "rock":
+                        for _ in range(qty):
+                            used, brk = player.use_pickaxe(1)
+                            if brk: msg.append(brk); break
+                    if cl.get("meta", {}).get("hazard"):
+                        hk = cl["meta"].get("hazard_key"); h = HAZARDS.get(hk, {}); base_dmg = h.get("dmg", 0)
+                        hits = 0; blocked = 0; total_dmg = 0; broken = False
+                        for _ in range(qty):
+                            if random.random() < h.get("chance", 0.5):
+                                final_dmg = base_dmg
+                                if player.wearing:
+                                    reduction = player.armor_hazard_reduction(hk)
+                                    final_dmg = max(0, base_dmg - reduction)
+                                    if final_dmg < base_dmg:
+                                        player.armor_dur -= final_dmg
+                                        if player.armor_dur <= 0:
+                                            player.wearing = None
+                                            player.armor_dur = 0
+                                            broken = True
+                                if final_dmg > 0:
+                                    player.note_damage_cause(f"Hit by {hk.replace('_', ' ').title()}")
+                                    player.health -= final_dmg
+                                    total_dmg += final_dmg
+                                    hits += 1
+                                else:
+                                    blocked += 1
+                        if hits > 0:
+                            msg.append(f"💥 Hit by {hk.replace('_', ' ').title()} {hits} times! -{total_dmg} HP")
+                            flash_damage()
+                        elif blocked > 0:
+                            msg.append("🛡️ Attack blocked by armor!")
+                        if broken:
+                            msg.append("💥 Armor broke!")
+                    cl["qty"] = 0
+                    world.depleted.add((int(player.x), int(player.y)))
+                    del world.clusters[(int(player.x), int(player.y))]
+                    player.energy = max(0, player.energy - energy_cost)
+                    msg.append(f"✅ Gathering finished! Energy cost = {energy_cost}.")
+                    msg = msg[-3:]
 
                 # ---- GATHER ----
                 elif act == "gather":
@@ -4578,7 +5453,7 @@ def main():
                         msg.append("⏸️ Can't gather while paused. Resume first."); msg = msg[-3:]; continue
                     # Blocked while crafting
                     if player.active_tasks:
-                        msg.append("🔨 Can't gather while crafting! Wait for it to finish."); msg = msg[-3:]; continue
+                        msg.append("🔨 Can't gather while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; continue
                     if player.fatigue <= 0:
                         msg.append("😴 Too exhausted to gather! Type 'rest' to recover Fatigue."); continue
                     cl = world.clusters.get((int(player.x),int(player.y)))
@@ -4621,8 +5496,8 @@ def main():
                         hk = cl["meta"].get("hazard_key"); h = HAZARDS.get(hk,{}); base_dmg = h.get("dmg",0)
                         final_dmg = base_dmg
                         if player.wearing:
-                            multiplier = player.armor_damage_multiplier()
-                            final_dmg = int(round(base_dmg * multiplier))
+                            reduction = player.armor_hazard_reduction(hk)
+                            final_dmg = max(0, base_dmg - reduction)
                         if player.wearing and final_dmg < base_dmg:
                             player.armor_dur -= final_dmg
                             if player.armor_dur <= 0:
@@ -4631,6 +5506,7 @@ def main():
                                 msg.append("💥 Armor broke!")
                         if random.random() < h.get("chance",0.5):
                             if final_dmg > 0:
+                                player.note_damage_cause(f"Hit by {hk.replace('_', ' ').title()}")
                                 player.health -= final_dmg
                                 hazard_name = hk.replace("_", " ").title() if hk else "Unknown"
                                 msg.append(f"💥 Hit by {hazard_name}! -{final_dmg} HP")
@@ -4664,9 +5540,14 @@ def main():
                 # ---- CRAFT ----
                 elif act == "craft":
                     target = arg.lower().replace(" ","_")
+                    # Shortcuts
+                    if target in ("filter_water", "filter", "filter water"):
+                        target = "filtered_water"
                     # Special: campfire is instant — converts 1 fire_fuel into FIRE_FUEL_PARTS campfire fuel
                     if paused:
                         msg.append("⏸️ Can't craft while paused. Resume first."); msg = msg[-3:]; continue
+                    if player.fatigue <= 0:
+                        msg.append("😴 Too exhausted to craft! Type 'rest' to recover Fatigue."); msg = msg[-3:]; continue
                     if target == "campfire":
                         if player.active_tasks:
                             msg.append("🔨 Can't light a campfire while crafting!")
@@ -4760,8 +5641,36 @@ def main():
 
                 elif act == "cancel":
                     if player.active_tasks:
-                        player.active_tasks.clear()
-                        msg.append("❌ Crafting cancelled.")
+                        t = player.active_tasks[0]
+                        now_c = time.time()
+                        elapsed = t["igm"] - max(0, t["end"] - now_c)
+                        pct_done = elapsed / max(1, t["igm"])
+                        item_name = t["item"].replace("_", " ").title()
+                        print(f"\n🔨 Cancelling: {item_name} ({int(pct_done*100)}% done)")
+                        print("  1. Refund materials")
+                        print("  2. Save progress (get half-finished item, resume later)")
+                        try:
+                            ch = input("  Choice [1/2]: ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            ch = "1"
+                        if ch == "2":
+                            # Save partial progress
+                            half_key = "half_" + t["item"]
+                            player.inventory[half_key] = player.inventory.get(half_key, 0) + 1
+                            # Store time remaining so next craft is faster
+                            if not hasattr(player, "craft_progress"):
+                                player.craft_progress = {}
+                            player.craft_progress[t["item"]] = {"pct": pct_done, "elapsed": elapsed}
+                            player.active_tasks.clear()
+                            msg.append(f"📦 Saved half-finished {item_name}. Next time you craft it, it will be {int(pct_done*100)}% done already.")
+                        else:
+                            refund_parts = []
+                            for mat_k, mat_v in t.get("mat_used", {}).items():
+                                player.inventory[mat_k] = player.inventory.get(mat_k, 0) + mat_v
+                                refund_parts.append(f"{mat_v} {mat_k.replace('_',' ')}")
+                            player.active_tasks.clear()
+                            refund_str = ", ".join(refund_parts) if refund_parts else "none"
+                            msg.append(f"❌ Crafting cancelled. Refunded: {refund_str}")
                     else:
                         msg.append("ℹ️ No crafting task to cancel.")
                     msg = msg[-3:]; continue
@@ -4769,7 +5678,7 @@ def main():
                 # ---- EAT / DRINK ----
                 elif act in ("eat","drink") and arg:
                     if player.active_tasks:
-                        msg.append("🔨 Can't eat while crafting! Wait for it to finish."); msg = msg[-3:]; continue
+                        msg.append("🔨 Can't eat while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; continue
                     raw_in = arg.lower().strip(); raw_k = raw_in.replace(" ","_")
                     real_item = CONSUME_ALIASES.get(raw_in, CONSUME_ALIASES.get(raw_k, raw_k))
                     unk_key = find_unknown_inv_key(player, raw_in)
@@ -4785,10 +5694,13 @@ def main():
                     if not found_item:
                         msg.append("❌ Item not found."); continue
                     eff = food_effects.get(inv_key)
+                    if inv_key in ("bandages", "enhanced_bandage"):
+                        msg.append(f"🩹 Use the 'bandage' command to apply bandages, not 'eat'."); msg = msg[-3:]; continue
                     if not eff: msg.append(f"❌ {inv_key.replace('_',' ').title()} is not edible."); continue
                     if eff.get("risk") == "mystery_mushroom":
                         mm = roll_mystery_mushroom()
                         if random.random() < mm["risk_pct"] / 100.0:
+                            player.note_damage_cause("Mystery mushroom poisoning")
                             player.health = max(0, player.health - mm["damage"])
                             msg.append(f"☠️ Mystery mushroom backfired! -{mm['damage']} HP.")
                             player.health = min(MAX_STAT_CAP, player.health + 0)
@@ -4824,6 +5736,26 @@ def main():
                     note = f" ({eff['notes']})" if eff.get("notes") else ""
                     msg.append(f"🍽️ Consumed {arg.title()}{note}")
 
+                # ---- BANDAGE ----
+                elif act in ("bandage", "apply"):
+                    if player.inventory.get("enhanced_bandage", 0) > 0:
+                        btype = "enhanced_bandage"
+                    elif player.inventory.get("bandages", 0) > 0:
+                        btype = "bandages"
+                    else:
+                        btype = None
+                    if not btype:
+                        msg.append("🩹 No bandages in inventory. Craft them: 10 spider_silk at sewing_station.")
+                    elif player.health >= player.max_health:
+                        msg.append("❤️ Already at full health!")
+                    else:
+                        eff = food_effects.get(btype, {})
+                        heal = eff.get("health", 20)
+                        player.health = min(player.max_health, player.health + heal)
+                        player.inventory[btype] -= 1
+                        msg.append(f"🩹 Applied {btype.replace('_',' ')}! +{heal} HP (now {int(player.health)} HP)")
+                    msg = msg[-3:]
+
                 # ---- WALK ----
                 elif act == "walk" and arg:
                     if paused:
@@ -4832,8 +5764,11 @@ def main():
                     arg_clean = arg.strip().lower()
                     if arg_clean.startswith("to "):
                         arg_clean = arg_clean[3:].strip()
-                    # Check if arg is coordinates (format: "5,3", "@5,3", or "to 5,3")
-                    coords_str = arg_clean.lstrip("@ ").replace(" ","")
+                    # Check if arg is coordinates (format: "5,3", "@5,3", or "(-1, 4)")
+                    coords_str = arg_clean.lstrip("@ ").strip()
+                    if coords_str.startswith("(") and coords_str.endswith(")"):
+                        coords_str = coords_str[1:-1].strip()
+                    coords_str = coords_str.replace(" ", "")
                     try:
                         if "," in coords_str:
                             cx, cy = map(float, coords_str.split(",", 1))
@@ -4848,7 +5783,7 @@ def main():
                     except (ValueError, IndexError):
                         pass
                     # Otherwise search for resource by name
-                    search = arg_clean.replace("to ","").strip()
+                    search = arg_clean.replace("to ", "").strip()
                     best = None; bd = 9999
                     for c in world.clusters.values():
                         if (search in c["real_item"] or search in c["name"].lower() or
@@ -4906,6 +5841,30 @@ def main():
                             msg.append(f"✅ Sold {ik.replace('_',' ').title()} for {ITEM_PRICES[ik]}🪙")
                         else: msg.append("❌ None to sell.")
 
+                # ---- UNEQUIP (alias) ----
+                elif act == "unequip":
+                    target = arg.strip().replace(" ","_").lower() if arg else "all"
+                    if target in ("pants", "none_pants", "all", ""):
+                        if player.wearing_pants:
+                            player.inventory[player.wearing_pants] = player.inventory.get(player.wearing_pants,0)+1
+                            ins = CLOTHING_INSULATION.get(player.wearing_pants, 0)
+                            msg.append(f"👖 {player.wearing_pants.replace('_',' ').title()} removed. -{ins} insulation.")
+                            player.wearing_pants = None
+                        else: msg.append("❌ No pants being worn.")
+                    if target in ("shirt", "none_shirt", "all", ""):
+                        if player.wearing_shirt:
+                            player.inventory[player.wearing_shirt] = player.inventory.get(player.wearing_shirt,0)+1
+                            ins = CLOTHING_INSULATION.get(player.wearing_shirt, 0)
+                            msg.append(f"👕 {player.wearing_shirt.replace('_',' ').title()} removed. -{ins} insulation.")
+                            player.wearing_shirt = None
+                    if target in ("armor", "all", ""):
+                        if player.wearing:
+                            player.inventory[player.wearing] = player.inventory.get(player.wearing,0)+1
+                            msg.append(f"🛡️ {player.wearing.replace('_',' ').title()} removed.")
+                            player.wearing = None
+                    if target not in ("pants","none_pants","shirt","none_shirt","armor","all",""):
+                        msg.append(f"❌ Can't unequip '{target}'. Try: unequip pants / shirt / armor / (blank for all)")
+
                 # ---- EQUIP ----
                 elif act == "equip":
                     target = arg.strip().replace(" ","_").lower(); equipped = True
@@ -4946,16 +5905,20 @@ def main():
                     # --- Armor slot ---
                     elif target in ("heavy_armor","medium_armor","light_armor"):
                         if player.inventory.get(target,0) > 0:
+                            # Return old armor to inventory if already wearing one
+                            if player.wearing:
+                                player.inventory[player.wearing] = player.inventory.get(player.wearing,0)+1
                             player.wearing = target
                             player.armor_dur = 1800 if target=="heavy_armor" else (1000 if target=="medium_armor" else 500)
                             player.inventory[target] -= 1
                             msg.append(f"🛡️ Equipped {target.replace('_',' ').title()}!")
                         else:
                             msg.append(f"❌ No {target.replace('_',' ')} in inventory.")
-                    elif target == "none":
+                    elif target in ("none", "armor", "unequip_armor"):
                         if player.wearing:
                             player.inventory[player.wearing] = player.inventory.get(player.wearing,0)+1
-                            player.wearing = None; msg.append("🛡️ Armor removed.")
+                            old_armor = player.wearing
+                            player.wearing = None; msg.append(f"🛡️ {old_armor.replace('_',' ').title()} removed and returned to inventory.")
                         else: msg.append("❌ No armor being worn.")
                     # --- Equip spear ---
                     elif target in SPEAR_DEFS:
@@ -4996,25 +5959,30 @@ def main():
                     px, py = int(player.x), int(player.y)
 
                     if sub == "set":
+                        if player.fatigue <= 0:
+                            msg.append("😴 Too exhausted to set traps! Type 'rest' to recover Fatigue."); msg = msg[-3:]; continue
                         # Prefer poison_trap if available, else regular trap
                         trap_type = None
-                        if player.inventory.get("poison_trap", 0) > 0: trap_type = "poison_trap"
-                        elif player.inventory.get("trap", 0) > 0:      trap_type = "trap"
+                        if player.inventory.get("poison_trap", 0) > 0:
+                            trap_type = "poison_trap"
+                        elif player.inventory.get("trap", 0) > 0:
+                            trap_type = "trap"
                         if trap_type is None:
                             msg.append("❌ No traps in inventory. Craft one: 'craft trap'.")
                         elif any(t["pos"] == [px, py] for t in player.traps):
                             msg.append("⚠️ A trap is already set here. Check or remove it first.")
                         else:
                             player.inventory[trap_type] -= 1
-                        if not player.first_trap_set:
-                            player.first_trap_set = True
-                        player.traps_set += 1
-                        icon = "☠️" if trap_type == "poison_trap" else "🪤"
-                        player.traps.append({
-                            "pos": [px, py], "type": trap_type, "status": "setting",
-                            "set_time": now_t, "catch_time": now_t + TRAP_CATCH_TIME,
-                        })
-                        msg.append(f"{icon} {trap_type.replace('_',' ').title()} set at ({px},{py})! Check in ~{int(TRAP_CATCH_TIME)}s.")
+                            if not player.first_trap_set:
+                                player.first_trap_set = True
+                            player.traps_set += 1
+                            icon = "☠️" if trap_type == "poison_trap" else "🪤"
+                            player.traps.append({
+                                "pos": [px, py], "type": trap_type, "status": "setting",
+                                "set_time": now_t, "catch_time": now_t + TRAP_CATCH_TIME,
+                                "uses": 0, "max_uses": random.randint(4, 5),
+                            })
+                            msg.append(f"{icon} {trap_type.replace('_',' ').title()} set at ({px},{py})! Check in ~{int(TRAP_CATCH_TIME)}s.")
 
                     elif sub in ("check", "collect"):
                         here = [t for t in player.traps if t["pos"] == [px, py]]
@@ -5025,20 +5993,24 @@ def main():
                             for trap in here:
                                 if trap["status"] == "caught":
                                     meat = random.randint(1, 3)
-                                    player.inventory["raw_game"] = player.inventory.get("raw_game", 0) + meat
+                                    player.inventory["meat"] = player.inventory.get("meat", 0) + meat
                                     extra = ""
                                     if trap["type"] == "poison_trap":
                                         player.inventory["bone"] = player.inventory.get("bone", 0) + 1
                                         extra = " + 1 Bone"
                                         player.poison_kills += 1
-                                    else:
-                                        extra = ""
                                     player.trap_successes += 1
+                                    trap["uses"] = trap.get("uses", 0) + 1
+                                    max_uses = trap.get("max_uses", 4)
                                     icon = "☠️" if trap["type"] == "poison_trap" else "🪤"
-                                    msg.append(f"{icon} Collected {meat} Raw Game{extra}! Trap re-armed.")
-                                    trap["status"] = "setting"
-                                    trap["set_time"] = now_t
-                                    trap["catch_time"] = now_t + TRAP_CATCH_TIME
+                                    if trap["uses"] >= max_uses:
+                                        player.traps.remove(trap)
+                                        msg.append(f"{icon} Collected {meat} Meat{extra}! Trap broke after {trap['uses']} uses.")
+                                    else:
+                                        msg.append(f"{icon} Collected {meat} Meat{extra}! Trap re-armed. ({trap['uses']}/{max_uses} uses)")
+                                        trap["status"] = "setting"
+                                        trap["set_time"] = now_t
+                                        trap["catch_time"] = now_t + TRAP_CATCH_TIME
                                     collected = True
                                 else:
                                     rem = max(0, int(trap["catch_time"] - now_t))
@@ -5183,7 +6155,22 @@ def main():
                     except Exception as e:
                         msg.append(f"⚠️ Save failed: {e}")
                 elif cmd in ("quit","exit"): game_over = True
-                else: msg.append(f"❓ Unknown command. Type 'help' for guide.")
+                else:
+                    all_cmds = ["help","gather","gather all","craft","rest","hunt","eat","drink","inv","inventory",
+                                "recipes","shop","buy","sell","quests","achievements","explain","inspect",
+                                "identify","trap","traps","wear","remove","equip","unequip","fire","walk","go",
+                                "cancel","pause","resume","save","quit","exit","bandage","apply","status","filter"]
+                    close = [c for c in all_cmds if act and (act in c or c in act or sum(a==b for a,b in zip(act,c)) >= max(1, min(len(act),len(c))-2))]
+                    if close:
+                        if act and any(c.isalnum() for c in act):
+                            msg.append(f"❓ Unknown command '{act}'. Did you mean: {', '.join(close[:3])}? Type 'help' for guide.")
+                        else:
+                            msg.append("❓ Unknown command. Type 'help' for guide.")
+                    else:
+                        if act and any(c.isalnum() for c in act):
+                            msg.append(f"❓ Unknown command '{act}'. Type 'help' for guide.")
+                        else:
+                            msg.append("❓ Unknown command. Type 'help' for guide.")
                 msg = msg[-3:]
 
             elif key in ('\x7f','\x08'):

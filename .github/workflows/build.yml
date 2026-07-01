@@ -1,0 +1,47 @@
+name: Build 9 Planets
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Lets you trigger manually
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller pygame
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name "9Planets" 9_planets.py
+      - name: Upload macOS Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: 9Planets-macOS
+          path: dist/9Planets
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          pip install pyinstaller pygame
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller --onefile --name "9Planets" 9_planets.py
+      - name: Upload Linux Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: 9Planets-Linux
+          path: dist/9Planets

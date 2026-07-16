@@ -95,40 +95,108 @@ def vwrap(s, width):
     lines.append(cur)
     return lines
 
+def _cell2(icon):
+    """Normalize a single map tile to exactly 2 terminal columns.
+
+    Most game emoji are in the high plane (>= U+1F000) with east_asian_width
+    'W' and always occupy 2 terminal columns.  A few high-plane emoji (e.g.
+    U+1F5E1 DAGGER 🗡️, U+1F6E1 SHIELD 🛡️) have east_asian_width 'N'
+    (Neutral) and render as 1 column in most terminals.  Legacy "Misc
+    Symbols" below U+1F000 (e.g. ☘, ☠, ⚔) are similarly 1-wide.  This
+    function adds a trailing space to 1-wide cells so every map row is
+    consistently 2 columns wide, keeping vertical movement perfectly aligned.
+
+    Cells that contain ANSI escape codes still need their visible glyph padded;
+    otherwise a 1-wide blink marker can leave half of the previous emoji behind.
+    """
+    if not icon:
+        return "  "
+    if "\033" in icon:
+        try:
+            import re as _re
+            visible = _re.sub(r"\033\[[0-9;?]*[ -/]*[@-~]", "", icon)
+            w = vlen(visible)
+            if w < 2:
+                return icon + " " * (2 - w)
+            return icon
+        except Exception:
+            return icon
+    cp0 = ord(icon[0])
+    if cp0 >= 0x1F000:
+        # High-plane emoji are almost always 2-wide (eaw='W'), but a handful
+        # have eaw='N' and render as 1-wide in terminals (e.g. 🗡️, 🛡️).
+        if unicodedata.east_asian_width(icon[0]) in ("W", "F"):
+            return icon                         # fast path: unambiguously 2-wide
+        # eaw 'N' or 'A' in high plane → treat as 1-wide, pad with space
+        return icon + " "
+    # Below U+1F000: measure actual visual width and pad if needed
+    w = vlen(icon)
+    if w < 2:
+        return icon + " " * (2 - w)
+    return icon
+
+def _world_tile(x, y):
+    """Return the exact resource tile used by gather/inspect/build actions."""
+    return int(x), int(y)
+
 # ==================== COMMANDS SIDEBAR ====================
 # A reference list shown on the right side of wide terminals so players
 # always see the basic command vocabulary (mirrors Help page 1).
 SIDEBAR_COMMANDS = [
-    ("⬆️⬇️⬅️➡️",  "Move 1 tile"),
-    ("walk <name>", "Auto-path to resource"),
-    ("attack / a",  "Strike nearest animal"),
-    ("throw / t",   "Throw spear"),
-    ("gather",      "Collect at tile (-2⚡)"),
-    ("gather all",  "Collect whole cluster"),
-    ("inv",         "View inventory"),
-    ("eat <item>",  "Eat food"),
-    ("drink <item>","Drink water/liquid"),
-    ("craft <item>","Start crafting"),
-    ("cancel",      "Cancel current craft"),
-    ("pause craft", "Pause/resume crafting"),
-    ("inspect <x>", "Identify unknown item"),
-    ("identify <x>","Alias for inspect"),
-    ("recipes",     "Browse recipes"),
-    ("achievements","Progress & rewards"),
-    ("quests",      "Active quest log"),
-    ("shop",        "Browse shop prices"),
-    ("buy <item>",  "Buy from shop"),
-    ("sell <item>", "Sell to shop"),
-    ("equip <armor>","Wear/remove armor"),
-    ("rest",        "Toggle resting"),
-    ("trap set",    "Place trap here"),
-    ("trap check",  "Collect caught game"),
-    ("trap remove", "Retrieve a trap"),
-    ("trap list",   "Show active traps"),
-    ("pause",       "Pause/resume game"),
-    ("help",        "Open help menu"),
-    ("save",        "Save progress"),
-    ("quit",        "Exit game"),
+    # ── Movement ──────────────────────────────────────────────────────────
+    ("⬆️⬇️⬅️➡️",   "Move 1 tile (arrow keys)"),
+    ("walk <name>",  "Auto-walk to resource/animal"),
+    ("walk <x,y>",   "Walk to exact coordinates"),
+    # ── Combat ────────────────────────────────────────────────────────────
+    ("attack / a",   "Strike nearest animal"),
+    ("throw / t",    "Throw spear at nearest"),
+    ("hunt <animal>","Hunt: rabbit/deer/seal…"),
+    ("hunt … grid",  "Open tactical grid combat"),
+    # ── Resources ─────────────────────────────────────────────────────────
+    ("gather",       "Collect at current tile (-2⚡)"),
+    ("gather all",   "Collect whole cluster"),
+    ("inspect <x>",  "Identify unknown cluster"),
+    ("identify <x>", "Alias for inspect"),
+    ("explain <x>",  "Explain item details"),
+    # ── Inventory & Crafting ──────────────────────────────────────────────
+    ("inv",          "View inventory"),
+    ("eat <item>",   "Eat food from inventory"),
+    ("drink <item>", "Drink water / liquid"),
+    ("craft <item>", "Start crafting an item"),
+    ("cancel",       "Cancel crafting task"),
+    ("pause craft",  "Pause / resume crafting"),
+    ("recipes",      "Browse all recipes"),
+    # ── Equipment ─────────────────────────────────────────────────────────
+    ("equip <item>", "Equip armor / weapon"),
+    ("wear <item>",  "Alias for equip"),
+    ("remove <item>","Unequip item"),
+    ("bandage",      "Apply bandage (heal)"),
+    ("apply <item>", "Apply a usable item"),
+    # ── Survival ──────────────────────────────────────────────────────────
+    ("rest",         "Toggle resting (restore stats)"),
+    ("fire",         "Light / extinguish campfire"),
+    ("status",       "Show detailed status screen"),
+    ("filter",       "Use water filter on water"),
+    # ── Traps ─────────────────────────────────────────────────────────────
+    ("trap set",     "Place a trap at current tile"),
+    ("trap check",   "Collect caught animals"),
+    ("trap remove",  "Pick up a trap"),
+    ("trap list",    "Show all active traps"),
+    ("traps",        "Alias for trap list"),
+    # ── Economy & Quests ──────────────────────────────────────────────────
+    ("shop",         "Browse shop items & prices"),
+    ("buy <item>",   "Buy item from shop"),
+    ("sell <item>",  "Sell item to shop"),
+    ("quests",       "Active quest log"),
+    ("achievements", "Progress & rewards"),
+    # ── Game Control ──────────────────────────────────────────────────────
+    ("pause",        "Pause / resume game"),
+    ("resume",       "Resume (unpause)"),
+    ("help",         "Open help menu (paginated)"),
+    ("tutorials",    "Re-read tutorials"),
+    ("save",         "Save progress to file"),
+    ("commands",     "Toggle this command panel"),
+    ("quit / exit",  "Exit game"),
 ]
 
 def _build_commands_sidebar(width, height):
@@ -5007,13 +5075,695 @@ def check_lore_intro(term, player):
         show_lore_intro(term, player)
         player.lore_intro_ready_at = None
 
+
+def _attempt_graphics_mode(player, target_cols=88, target_rows=22):
+    """Auto-zoom the terminal for Graphics Mode.
+
+    Strategy (in order):
+      1. Already big enough → done.
+      2. TIOCSWINSZ ioctl   → OS-level size hint (Linux/macOS, instant).
+      3. xterm CSI 8 t      → window-resize escape (xterm, Kitty, iTerm2, WezTerm…).
+      4. stty rows/cols     → shell-level hint (some SSH/mosh setups).
+      5. Cycle through a table of terminal-specific sequences with measurement
+         between each attempt; stop as soon as the terminal is large enough.
+      6. Keyboard/font fallback modules when available.
+      7. Manual prompt with per-terminal zoom instructions.
+
+    Returns True when the terminal reports at least target_cols × target_rows.
+    """
+    if not getattr(player, "graphics_mode", False):
+        return False
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+
+    def _get_size():
+        try:
+            sz = os.get_terminal_size()
+            return sz.columns, sz.lines
+        except Exception:
+            return 80, 24
+
+    def _send(seq):
+        try:
+            sys.stdout.write(seq)
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+    def _big_enough(c, r):
+        return c >= target_cols and r >= target_rows
+
+    cur_c, cur_r = _get_size()
+    if _big_enough(cur_c, cur_r):
+        return True
+
+    # ── Detect terminal emulator ──────────────────────────────────────────
+    term_prog  = os.environ.get("TERM_PROGRAM", "").lower()
+    term_var   = os.environ.get("TERM", "").lower()
+    wt_session = os.environ.get("WT_SESSION", "")
+    kitty_id   = os.environ.get("KITTY_WINDOW_ID", "")
+    colorterm  = os.environ.get("COLORTERM", "").lower()
+    is_kitty   = bool(kitty_id) or "kitty" in term_var
+    is_iterm2  = "iterm" in term_prog
+    is_wt      = bool(wt_session)
+    is_vscode  = "vscode" in term_prog
+    is_wezterm = "wezterm" in term_prog
+    is_apple   = "apple_terminal" in term_prog
+    is_xterm   = "xterm" in term_var and not is_kitty
+    is_vte     = "vte" in term_var or "gnome" in term_var
+
+    # ── Multiplexer detection (tmux / screen / mosh) ─────────────────────
+    # Inside a multiplexer, the inner pty size IS controllable by the child
+    # process via TIOCSWINSZ / stty, so those tools actually work.
+    # Outside a multiplexer they only lie to the OS without resizing the
+    # visible window, so we must NOT count them as success.
+    _in_mux = bool(os.environ.get("TMUX") or
+                   os.environ.get("STY") or
+                   os.environ.get("MOSH_SERVER_PID"))
+
+    # ── Phase 1: TIOCSWINSZ ioctl ────────────────────────────────────────
+    # Works reliably inside tmux / screen / mosh.
+    # For direct terminal emulators it only changes what the OS reports,
+    # NOT the visible window — so we only trust its success there.
+    try:
+        import fcntl, struct
+        _ws = struct.pack("HHHH", target_rows, target_cols, 0, 0)
+        fcntl.ioctl(sys.stdout.fileno(), termios.TIOCSWINSZ, _ws)
+        time.sleep(0.05)
+        if _in_mux:
+            cur_c, cur_r = _get_size()
+            if _big_enough(cur_c, cur_r):
+                return True
+    except Exception:
+        pass
+
+    # ── Phase 2: xterm CSI 8 t — window resize escape ────────────────────
+    # Works on xterm, Kitty, iTerm2, WezTerm, and most VTE-based terminals.
+    # {c2}/{r2} are a 10-col/4-row overshoot to overcome rounding.
+    c2, r2 = target_cols + 10, target_rows + 4
+    _seqs = []
+
+    if is_kitty:
+        _seqs += [
+            (f"\033[8;{target_rows};{target_cols}t", 0.15),
+            (f"\033[8;{r2};{c2}t\033[8;{target_rows};{target_cols}t", 0.25),
+        ]
+    elif is_iterm2:
+        _seqs += [
+            (f"\033[8;{target_rows};{target_cols}t", 0.15),
+            (f"\033[8;{target_rows};{target_cols}t", 0.25),
+        ]
+    elif is_wezterm:
+        _seqs += [
+            (f"\033[8;{target_rows};{target_cols}t", 0.15),
+            (f"\033[8;{r2};{c2}t", 0.15),
+            (f"\033[8;{target_rows};{target_cols}t", 0.20),
+        ]
+    elif is_wt:
+        _seqs += [
+            (f"\033[8;{target_rows};{target_cols}t", 0.20),
+        ]
+    elif is_xterm or is_vte:
+        _seqs += [
+            (f"\033[8;{target_rows};{target_cols}t", 0.15),
+            (f"\033[8;{r2};{c2}t", 0.10),
+            (f"\033[8;{target_rows};{target_cols}t", 0.20),
+            (f"\033[4;{target_rows * 16};{target_cols * 8}t", 0.20),
+        ]
+
+    _seqs += [
+        (f"\033[8;{target_rows};{target_cols}t", 0.15),
+        (f"\033[8;{r2};{c2}t",                  0.15),
+        (f"\033[8;{target_rows};{target_cols}t", 0.25),
+        (f"\033[4;{target_rows * 16};{target_cols * 8}t", 0.20),
+        (f"\033[8;{target_rows};{target_cols}t\033[8;{target_rows};{target_cols}t", 0.30),
+    ]
+
+    for seq, pause in _seqs:
+        _send(seq)
+        time.sleep(pause)
+        cur_c, cur_r = _get_size()
+        if _big_enough(cur_c, cur_r):
+            break
+
+    # ── Phase 2b: Keyboard / module zoom fallback ────────────────────────
+    # Prefer making the font BIGGER (fewer, larger characters) while keeping
+    # enough rows/columns for the map. If the terminal is too small, fall back
+    # to zooming out just enough to fit. Manual instructions are last resort.
+    #
+    # Supported platforms:
+    #   Windows (native) — Win32 keybd_event
+    #   WSL               — PowerShell SendKeys
+    #   macOS             — osascript System Events keystroke
+    #   Linux X11         — xdotool key (if installed)
+
+    _VK_CTRL  = 0x11
+    _VK_MINUS = 0xBD   # VK code for '-'
+    _VK_PLUS  = 0xBB   # VK code for '='
+    _VK_KEYUP = 0x0002
+
+    def _send_ctrl_key_win32(vk):
+        import ctypes as _ct
+        _u = _ct.windll.user32
+        _u.keybd_event(_VK_CTRL, 0, 0, 0)
+        _u.keybd_event(vk, 0, 0, 0)
+        _u.keybd_event(vk, 0, _VK_KEYUP, 0)
+        _u.keybd_event(_VK_CTRL, 0, _VK_KEYUP, 0)
+
+    def _send_ctrl_key_ps(vk_char):
+        os.system(
+            f'powershell.exe -NoProfile -Command "'
+            f'Add-Type -AssemblyName System.Windows.Forms; '
+            f'[System.Windows.Forms.SendKeys]::SendWait(\\\"^{vk_char}\\\")" 2>/dev/null'
+        )
+
+    def _send_key_macos(key_char, use_cmd=True):
+        mod = "command" if use_cmd else "control"
+        os.system(
+            f"osascript -e 'tell application \"System Events\" "
+            f"to keystroke \"{key_char}\" using {mod} down' 2>/dev/null"
+        )
+
+    def _send_key_xdotool(key_spec):
+        os.system(f"xdotool key {key_spec} 2>/dev/null")
+
+    def _send_key_pyautogui(combo):
+        import pyautogui as _pag
+        _pag.hotkey(*combo)
+
+    def _send_key_pynput(combo):
+        from pynput.keyboard import Controller, Key
+        kb = Controller()
+        key_map = {"ctrl": Key.ctrl, "cmd": Key.cmd, "minus": "-", "equal": "=", "plus": "+"}
+        keys = [key_map.get(k, k) for k in combo]
+        for k in keys: kb.press(k)
+        for k in reversed(keys): kb.release(k)
+
+    def _send_key_keyboard(combo):
+        import keyboard as _keyboard
+        key_map = {"cmd": "command", "equal": "=", "plus": "+", "minus": "-"}
+        _keyboard.press_and_release("+".join(key_map.get(k, k) for k in combo))
+
+    def _run_silent(argv, timeout=3.0):
+        try:
+            import subprocess as _sp
+            return _sp.run(argv, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                           timeout=timeout, check=False).returncode == 0
+        except Exception:
+            return False
+
+    _is_wsl = (sys.platform != "win32" and
+               os.path.exists("/proc/version") and
+               "microsoft" in open("/proc/version").read().lower())
+
+    import shutil as _shutil
+
+    def _send_vscode_command(command_id):
+        """Resize VS Code integrated-terminal text by editing its settings.
+
+        VS Code does not honor terminal window-resize escape codes, and most
+        synthetic hotkeys are swallowed by the integrated terminal.  The
+        reliable route is changing terminal.integrated.fontSize in the VS Code
+        settings file; VS Code watches that file and resizes the terminal live.
+        """
+        is_out = "out" in str(command_id).lower() or "minus" in str(command_id).lower()
+        delta = -1 if is_out else 1
+
+        def _candidate_settings_paths():
+            home = os.path.expanduser("~")
+            paths = []
+            appdata = os.environ.get("APPDATA")
+            portable = os.environ.get("VSCODE_PORTABLE")
+            if portable:
+                paths += [os.path.join(portable, "data", "user-data", "User", "settings.json")]
+            if sys.platform == "win32":
+                base = appdata or os.path.join(home, "AppData", "Roaming")
+                for product in ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"):
+                    paths.append(os.path.join(base, product, "User", "settings.json"))
+            elif sys.platform == "darwin":
+                base = os.path.join(home, "Library", "Application Support")
+                for product in ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"):
+                    paths.append(os.path.join(base, product, "User", "settings.json"))
+            else:
+                xdg = os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config"))
+                for product in ("Code", "Code - Insiders", "VSCodium", "Cursor", "Windsurf"):
+                    paths.append(os.path.join(xdg, product, "User", "settings.json"))
+                # Remote/server-side VS Code installs sometimes mirror machine settings here.
+                for root in (".vscode-server", ".vscode-server-insiders", ".vscode-remote", ".cursor-server", ".windsurf-server"):
+                    paths.append(os.path.join(home, root, "data", "Machine", "settings.json"))
+            # Prefer existing files, then the normal product default for this platform.
+            existing = [q for q in paths if os.path.exists(q)]
+            missing = [q for q in paths if q not in existing]
+            return existing + missing[:1]
+
+        import re as _re
+        last_err = None
+        for settings_path in _candidate_settings_paths():
+            try:
+                os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as f:
+                        data = f.read()
+                except FileNotFoundError:
+                    data = ""
+                m = _re.search(r'("terminal\.integrated\.fontSize"\s*:\s*)(\d+(?:\.\d+)?)', data)
+                cur = float(m.group(2)) if m else 14.0
+                nxt = max(6.0, min(36.0, cur + delta))
+                val = str(int(nxt)) if float(nxt).is_integer() else str(nxt)
+                if m:
+                    data2 = data[:m.start(2)] + val + data[m.end(2):]
+                else:
+                    stripped = data.strip()
+                    if not stripped:
+                        data2 = '{\n    "terminal.integrated.fontSize": ' + val + '\n}\n'
+                    else:
+                        brace = data.rfind("}")
+                        if brace < 0:
+                            raise RuntimeError("settings.json has no closing brace")
+                        before = data[:brace].rstrip()
+                        after = data[brace:]
+                        comma = "" if before.endswith("{") else ","
+                        data2 = before + comma + '\n    "terminal.integrated.fontSize": ' + val + '\n' + after
+                with open(settings_path, "w", encoding="utf-8") as f:
+                    f.write(data2)
+                time.sleep(0.45)
+                return
+            except Exception as exc:
+                last_err = exc
+        raise RuntimeError(f"VS Code font setting unavailable: {last_err}")
+
+    def _kbd_loop(send_fn, send_arg, flip_arg=None):
+        """Zoom out up to 14× until terminal is big enough."""
+        nonlocal cur_c, cur_r
+        _prev_area = cur_c * cur_r
+        _cur_arg   = send_arg
+        for _z in range(14):
+            cur_c, cur_r = _get_size()
+            if _big_enough(cur_c, cur_r):
+                return True
+            _area = cur_c * cur_r
+            if _z == 1 and flip_arg and _prev_area > 0 and _area < _prev_area:
+                _cur_arg = flip_arg   # font got bigger → flip direction
+            _prev_area = _area
+            try:
+                send_fn(_cur_arg)
+            except Exception:
+                return False
+            time.sleep(0.30)
+        cur_c, cur_r = _get_size()
+        return _big_enough(cur_c, cur_r)
+
+    def _kbd_zoom_in_loop(send_fn, zoom_in_arg, zoom_out_arg):
+        """Zoom in for larger tiles, but undo the last step if the map no longer fits."""
+        nonlocal cur_c, cur_r
+        cur_c, cur_r = _get_size()
+        if not _big_enough(cur_c, cur_r):
+            return False
+        changed = False
+        # Leave a small safety margin so the HUD/map does not wrap after zooming.
+        for _z in range(10):
+            prev_c, prev_r = cur_c, cur_r
+            try:
+                send_fn(zoom_in_arg)
+            except Exception:
+                return False
+            time.sleep(0.30)
+            cur_c, cur_r = _get_size()
+            # If the terminal did not report a change, keep trying other fallbacks.
+            if (cur_c, cur_r) == (prev_c, prev_r):
+                continue
+            changed = True
+            if not _big_enough(cur_c, cur_r):
+                try:
+                    send_fn(zoom_out_arg)
+                    time.sleep(0.30)
+                except Exception:
+                    pass
+                cur_c, cur_r = _get_size()
+                return _big_enough(cur_c, cur_r)
+            if cur_c <= target_cols + 8 or cur_r <= target_rows + 3:
+                return True
+        cur_c, cur_r = _get_size()
+        return changed and _big_enough(cur_c, cur_r)
+
+    def _try_module_hotkeys(zoom_in=True):
+        combos = []
+        if sys.platform == "darwin":
+            combos = [("cmd", "equal"), ("cmd", "plus")] if zoom_in else [("cmd", "minus")]
+        else:
+            combos = [("ctrl", "equal"), ("ctrl", "plus")] if zoom_in else [("ctrl", "minus")]
+        for combo in combos:
+            try:
+                if _kbd_zoom_in_loop(_send_key_keyboard, combo, (combo[0], "minus")) if zoom_in else _kbd_loop(_send_key_keyboard, combo):
+                    return True
+            except Exception:
+                pass
+            try:
+                if _kbd_zoom_in_loop(_send_key_pyautogui, combo, (combo[0], "minus")) if zoom_in else _kbd_loop(_send_key_pyautogui, combo):
+                    return True
+            except Exception:
+                pass
+            try:
+                if _kbd_zoom_in_loop(_send_key_pynput, combo, (combo[0], "minus")) if zoom_in else _kbd_loop(_send_key_pynput, combo):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _try_vscode_commands(zoom_in=True):
+        if not is_vscode:
+            return False
+        zin = "workbench.action.terminal.fontZoomIn"
+        zout = "workbench.action.terminal.fontZoomOut"
+        try:
+            if zoom_in:
+                return _kbd_zoom_in_loop(_send_vscode_command, zin, zout)
+            return _kbd_loop(_send_vscode_command, zout, zin)
+        except Exception:
+            return False
+
+    cur_c, cur_r = _get_size()
+    if _big_enough(cur_c, cur_r):
+        if _try_vscode_commands(zoom_in=True):
+            return True
+        if sys.platform == "win32":
+            if _kbd_zoom_in_loop(_send_ctrl_key_win32, _VK_PLUS, _VK_MINUS):
+                return True
+        elif _is_wsl:
+            if _kbd_zoom_in_loop(_send_ctrl_key_ps, "=", "-"):
+                return True
+        elif sys.platform == "darwin":
+            if _kbd_zoom_in_loop(_send_key_macos, "+", "-"):
+                return True
+        elif sys.platform.startswith("linux") and _shutil.which("xdotool"):
+            if _kbd_zoom_in_loop(_send_key_xdotool, "ctrl+equal", "ctrl+minus"):
+                return True
+        if _try_module_hotkeys(zoom_in=True):
+            return True
+        return True
+
+    if _try_vscode_commands(zoom_in=False):
+        return True
+    if sys.platform == "win32":
+        if _kbd_loop(_send_ctrl_key_win32, _VK_MINUS, _VK_PLUS):
+            return True
+    elif _is_wsl:
+        if _kbd_loop(_send_ctrl_key_ps, "-", "="):
+            return True
+    elif sys.platform == "darwin":
+        # macOS terminals use Cmd+- to shrink font; Cmd+= to grow it.
+        if _kbd_loop(_send_key_macos, "-", "+"):
+            return True
+    elif sys.platform.startswith("linux") and _shutil.which("xdotool"):
+        # Linux X11: xdotool simulates keystrokes to the focused window.
+        if _kbd_loop(_send_key_xdotool, "ctrl+minus", "ctrl+equal"):
+            return True
+    if _try_module_hotkeys(zoom_in=False):
+        return True
+
+    # ── Phase 2c: Last-ditch — try to auto-install a keystroke module ────
+    # If none of pyautogui / keyboard / pynput are importable, the
+    # `_try_module_hotkeys` path above did nothing. Attempt a quiet pip
+    # install and retry once. This is the "don't give up" phase.
+    def _have(mod):
+        try:
+            __import__(mod); return True
+        except Exception:
+            return False
+
+    if not (_have("pyautogui") or _have("keyboard") or _have("pynput")):
+        for pkg in ("pyautogui", "pynput", "keyboard"):
+            try:
+                import subprocess as _sp
+                _sp.run([sys.executable, "-m", "pip", "install",
+                         "--quiet", "--disable-pip-version-check",
+                         "--user", pkg],
+                        timeout=45, check=False,
+                        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                if _have(pkg):
+                    break
+            except Exception:
+                pass
+        # Retry module hotkeys after install attempt.
+        try:
+            if _try_module_hotkeys(zoom_in=False):
+                return True
+        except Exception:
+            pass
+
+    # ── Phase 3: stty (multiplexer-only; same false-positive caveat) ─────
+    if _in_mux:
+        try:
+            os.system(f"stty rows {target_rows} cols {target_cols} 2>/dev/null")
+            time.sleep(0.10)
+            cur_c, cur_r = _get_size()
+            if _big_enough(cur_c, cur_r):
+                return True
+        except Exception:
+            pass
+
+    # ── Phase 4: manual fallback ──────────────────────────────────────────
+    # Tell the user exactly what key to press.  Goal: shrink the font so
+    # MORE characters fit in the same window (the opposite of "zoom in").
+    sys.stdout.write("\r\n")
+    sys.stdout.flush()
+    print()
+    print("  📐 Graphics Mode: automatic terminal resize was not possible.")
+    print(f"     Target  : {target_cols} columns × {target_rows} rows")
+    print(f"     Current : {cur_c} columns × {cur_r} rows")
+    print()
+    print("  I tried automatic keyboard/module zoom first. As a last resort,")
+    print("  adjust the terminal zoom/font until the map fits comfortably:")
+    if is_iterm2:
+        print("  💡 iTerm2         : Cmd+=/Cmd+- to adjust zoom")
+    elif is_apple:
+        print("  💡 Terminal.app   : Cmd+=/Cmd+- to adjust zoom, or drag the window larger")
+    elif is_wt:
+        print("  💡 Windows Terminal: Ctrl+=/Ctrl+- to adjust zoom, or drag the window larger")
+    elif is_kitty:
+        print("  💡 Kitty          : Ctrl+=/Ctrl+- to adjust zoom, or resize the window")
+    elif is_vscode:
+        print("  💡 VSCode terminal: adjust terminal.integrated.fontSize, or use Ctrl/Cmd+-")
+    elif is_wezterm:
+        print("  💡 WezTerm        : Ctrl+=/Ctrl+- to adjust zoom, or resize the window")
+    else:
+        print(f"  💡 Use Ctrl+=/Ctrl+- (or Cmd+=/Cmd+- on Mac) until you see ≥{target_rows} rows,")
+        print("     or drag the window corner to make it larger, then press Enter.")
+    print()
+    try:
+        if HAVE_TERMIOS and sys.stdin.isatty():
+            sys.stdout.write("  Press Enter when ready (or Enter to play at current size): ")
+            sys.stdout.flush()
+            while True:
+                ch = os.read(sys.stdin.fileno(), 1)
+                if ch in (b"\r", b"\n"):
+                    break
+        else:
+            input("  Press Enter when ready (or Enter to play at current size): ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    cur_c, cur_r = _get_size()
+    return _big_enough(cur_c, cur_r)
+
+# Identified-item → map emoji. When a cluster is identified, prefer the
+# specific icon so berries/mushrooms/etc. read at a glance. Unidentified
+# clusters keep the generic GRID_BERRIES / GRID_MUSHROOMS icon.
+_IDENTIFIED_ICON = {
+    "wild_berries":       "🫐",
+    "sweet_berries":      "🍬",
+    "sour_berries":       "🍋",
+    "glowing_berries":    "✨",
+    "frostberry":         "🫐",
+    "shimmer_frostberry": "✨",
+    "poisonous_berry":    "☠️",
+    "mushrooms":          "🍄",
+    "black_trumpets":     "🖤",
+    "spotted_mushrooms":  "🔴",
+    "mushroom_death_cap": "☠️",
+    "mystery_mushroom":   "✨",
+    "moss_healing":       "💚",
+    "moss_harmful":       "🌿",
+    "moss_mystery":       "✨",
+    "catnip":             "🌿",
+    "bee_hive":           "🐝",
+    "spider_silk":        "🕸️",
+    "honey":              "🍯",
+    "ironroot":           "🌱",
+    "fibergrass":         "🌾",
+    "snow":               "❄️",
+}
+
+def _cluster_icon(cl, default_icon):
+    """Return the map emoji for a cluster, honoring is_identified."""
+    if cl.get("is_identified"):
+        item = cl.get("real_item", "")
+        ico = _IDENTIFIED_ICON.get(item)
+        if ico:
+            return ico
+    return default_icon
+
+
+def _build_mini_map(player, world, map_w=17, map_h=11):
+    """Build a mini-map panel showing the world around the player.
+    Uses the same grid-mode tile constants (GRID_TREE, GRID_ROCK, etc.)
+    so the map looks consistent with grid combat mode.
+    Returns a list of strings (each an already-formatted display line).
+    map_w / map_h: tile dimensions (each tile is 2 display cols wide).
+    """
+    # Grid-mode tile constants (resolved at call time — defined later in file)
+    _EMPTY    = GRID_EMPTY
+    _TREE     = GRID_TREE
+    _ROCK     = GRID_ROCK
+    _CATNIP   = GRID_CATNIP
+    _BERRIES  = GRID_BERRIES
+    _MUSHROOMS= GRID_MUSHROOMS
+    _WATER    = GRID_WATER
+    _GRASS    = GRID_GRASS
+    _MOSS     = GRID_MOSS
+    _RESOURCE = GRID_RESOURCE
+
+    # Arctic background override
+    px, py = _world_tile(player.x, player.y)
+    try:
+        in_forest = biome_at(px, py) == "Forest"
+    except Exception:
+        in_forest = True
+    bg = _EMPTY if in_forest else "🟦"
+
+    hw = map_w // 2
+    hh = map_h // 2
+    ox = px - hw
+    oy = py - hh
+
+    # Build cell grid: (gi, gj) → emoji string
+    cells = {}
+    for gj in range(map_h):
+        for gi in range(map_w):
+            cells[(gi, gj)] = bg
+
+    # Clusters / resources
+    clusters = world.clusters if world is not None else {}
+    # Track which cluster was actually rendered onto the player's centre cell
+    # so the tile label always matches the emoji the player sees underfoot.
+    player_cluster = None
+    for (cx, cy), cl in clusters.items():
+        gi, gj = int(cx) - ox, int(cy) - oy
+        if not (0 <= gi < map_w and 0 <= gj < map_h):
+            continue
+        item = cl.get("real_item", "")
+        meta = cl.get("meta", {})
+        if meta.get("is_burning"):
+            icon = "🔥"
+        elif meta.get("is_ash"):
+            icon = "💨"
+        elif item == "wood":
+            icon = _TREE
+        elif item == "rock":
+            icon = _ROCK
+        elif item in ("fresh_water", "dirty_water", "freezing_water", "arctic_water",
+                      "freezing_dirty_water", "water"):
+            icon = _WATER
+        elif item.endswith("berries") or item.endswith("berry") or "berr" in item:
+            icon = _cluster_icon(cl, _BERRIES)
+        elif "mushroom" in item or item in ("black_trumpets", "spotted_mushrooms"):
+            icon = _cluster_icon(cl, _MUSHROOMS)
+        elif item in ("fibergrass", "snow"):
+            icon = _cluster_icon(cl, _GRASS)
+        elif item.startswith("moss"):
+            icon = _cluster_icon(cl, _MOSS)
+        elif item == "catnip":
+            icon = _cluster_icon(cl, _CATNIP)
+        elif item in ("bee_hive", "spider_silk"):
+            icon = _cluster_icon(cl, _RESOURCE)
+        else:
+            icon = _cluster_icon(cl, _RESOURCE)
+        cells[(gi, gj)] = icon
+        if (gi, gj) == (hw, hh):
+            player_cluster = cl
+
+    # Houses
+    for h in (world.houses if world is not None else []):
+        if h.get("hp", 0) <= 0:
+            continue
+        icon = HOUSE_DEFS.get(h.get("type", ""), {}).get("emoji", "🏠")
+        hgi, hgj = int(h["x"]) - ox, int(h["y"]) - oy
+        if 0 <= hgi < map_w and 0 <= hgj < map_h:
+            cells[(hgi, hgj)] = icon
+
+    # Animals
+    for a in (world.animals if world is not None else []):
+        agi, agj = int(round(a["x"])) - ox, int(round(a["y"])) - oy
+        if not (0 <= agi < map_w and 0 <= agj < map_h):
+            continue
+        icon = ANIMAL_DEFS.get(a.get("type", ""), {}).get("icon", "🐾")
+        cells[(agi, agj)] = icon
+
+    # Player marker (centre cell)
+    if 0 <= hw < map_w and 0 <= hh < map_h:
+        cells[(hw, hh)] = "⭐"
+
+    # Render bordered box
+    inner_w = map_w * 2
+    border_top = "┌─ MAP " + "─" * max(0, inner_w - 6) + "┐"
+    border_bot = "└" + "─" * inner_w + "┘"
+    lines = [border_top]
+    for gj in range(map_h):
+        row = "│" + "".join(_cell2(cells.get((gi, gj), bg)) for gi in range(map_w)) + "│"
+        lines.append(row)
+    lines.append(border_bot)
+    # Current-tile label — prefer the cluster the map actually drew under the
+    # player, falling back to a direct key lookup so the label is always
+    # consistent with the emoji at the player's tile.
+    cur_cluster = player_cluster or clusters.get((px, py))
+    if cur_cluster is None:
+        for (cx, cy), cl in clusters.items():
+            if int(cx) == px and int(cy) == py:
+                cur_cluster = cl
+                break
+    if cur_cluster:
+        if cur_cluster.get("is_identified"):
+            tile_item = display_item_name(cur_cluster.get("real_item", ""))
+            tile_qty  = cur_cluster.get("qty", 0)
+            tile_info = f"{tile_item} (qty:{tile_qty})"
+        else:
+            tile_info = "❓ Unknown resource"
+    else:
+        tile_info = "🌲 Forest — clear" if in_forest else "❄️ Arctic — clear"
+    lines.append(f"  📍 @({px},{py}): {tile_info}")
+    return lines
+
+
 # ==================== TERMINAL ====================
+# ---------------------------------------------------------------------------
+# Module-wide "active terminal" pointer so free functions (combat helpers,
+# turret fire logic, etc.) can trigger screen flashes without having to
+# thread `term` through their signatures.
+# ---------------------------------------------------------------------------
+_ACTIVE_TERM = None
+
+def _flash_hit(target_type):
+    """Flash the screen for a damage event on an entity.
+
+    Grots  → red flash (already used for the human player).
+    Others → yellow flash (animals: deer, bunny, squirrel, cat, …).
+    Safe to call from anywhere; no-op if no Terminal is active.
+    """
+    t = _ACTIVE_TERM
+    if t is None:
+        return
+    try:
+        t.flash_for_target(target_type)
+    except Exception:
+        pass
+
+
 class Terminal:
     def __init__(self):
         self.pause_context_player = None
         self.pause_context_world = None
         self.pause_context_weather = None
         self._red_flash_times = []
+        self._yellow_flash_times = []
         self.using_windows_fallback = not HAVE_TERMIOS
         if self.using_windows_fallback:
             self.fd = None
@@ -5021,16 +5771,28 @@ class Terminal:
         else:
             self.fd = sys.stdin.fileno()
             self.old = termios.tcgetattr(self.fd)
+        # Register as module-wide active terminal so helpers like
+        # _flash_hit() can find us from anywhere in the game code.
+        global _ACTIVE_TERM
+        _ACTIVE_TERM = self
 
     def setup(self):
         if not self.using_windows_fallback:
             tty.setraw(self.fd)
 
     def cleanup(self):
-        sys.stdout.write("\033[2J\033[1;1H\033[?25h")
+        sys.stdout.write("\033[2J\033[1;1H\033[?25h\033[0m")
         if not self.using_windows_fallback:
             termios.tcsetattr(self.fd, termios.TCSANOW, self.old)
         sys.stdout.flush()
+
+    def _theme_prefix(self, player=None):
+        mode = getattr(self, "theme_mode", "dark")
+        if mode == "day_night":
+            if player and getattr(player, "time_of_day", "day") == "night":
+                return "\033[40m\033[37m"
+            return "\033[47m\033[30m"
+        return "\033[40m\033[37m"
 
     def get_key(self, timeout=0.1):
         if self.using_windows_fallback:
@@ -5121,7 +5883,8 @@ class Terminal:
         # Flicker-free repaint: home cursor and overwrite each line with EL (clear-to-EOL),
         # then ED (clear-to-EOS) to wipe any leftover rows. Avoids the \033[2J blank-then-draw flash.
         out = "\033[K\r\n".join(vfit(str(l), TERM_WIDTH) for l in lines)
-        sys.stdout.write("\033[?25l\033[H" + out + "\033[K\r\n\033[J\033[?25h"); sys.stdout.flush()
+        theme = self._theme_prefix(getattr(self, "pause_context_player", None))
+        sys.stdout.write("\033[?25l\033[H" + theme + out + "\033[K\r\n\033[J\033[?25h"); sys.stdout.flush()
 
     def print_page(self, lines, wait=True):
         wait_started = time.time() if wait else None
@@ -5134,7 +5897,8 @@ class Terminal:
         # Flicker-free repaint: overwrite in place instead of clearing first.
         out = "\033[K\r\n".join(vfit(str(l), TERM_WIDTH) for l in wrapped)
         if wait: out += "\033[K\r\n\033[K\r\n  [Press Enter to continue]"
-        sys.stdout.write("\033[?25l\033[H" + out + "\033[K\033[J\033[?25h"); sys.stdout.flush()
+        theme = self._theme_prefix(getattr(self, "pause_context_player", None))
+        sys.stdout.write("\033[?25l\033[H" + theme + out + "\033[K\033[J\033[?25h"); sys.stdout.flush()
         if wait:
             while True:
                 k = self.get_key_no_flush(0.5)
@@ -5169,11 +5933,561 @@ class Terminal:
         time.sleep(0.05)
         sys.stdout.write("\033[2J\033[0m"); sys.stdout.flush()
 
+    def flash_yellow(self):
+        """Brief yellow-screen flash used when a non-grot animal is hit."""
+        now = time.time()
+        self._yellow_flash_times = [t for t in getattr(self, "_yellow_flash_times", []) if now - t < 5.0]
+        if len(self._yellow_flash_times) >= 3:
+            return
+        self._yellow_flash_times.append(now)
+        try: cols, rows = os.get_terminal_size()
+        except: cols, rows = TERM_WIDTH, 24
+        # \033[43m = yellow bg, \033[30m = black fg for contrast
+        sys.stdout.write("\033[2J\033[H\033[43m\033[30m")
+        for _ in range(rows):
+            sys.stdout.write((" " * cols) + "\n")
+        sys.stdout.write("\033[0m"); sys.stdout.flush()
+        time.sleep(0.05)
+        sys.stdout.write("\033[2J\033[0m"); sys.stdout.flush()
+
+    def flash_for_target(self, target_type):
+        """Grots flash red, other creatures (animals, cats) flash yellow."""
+        try:
+            t = (target_type or "").lower()
+            if t in ("grot", "grot_leader"):
+                self.flash_red()
+            else:
+                self.flash_yellow()
+        except Exception:
+            pass
+
+    def _render_graphics_mode(self, msg, prompt, buf, player, paused, world):
+        """Two-panel Graphics Mode renderer.
+        Left  : live map (20×20 classic OR adaptive to terminal).
+        Right : stats, optional commands panel, tile info, prompt.
+        Player emoji changes based on movement/weapon/shield state.
+        Frame 1 (even second): player=🟦, grots=🟥, animals blink.
+        Frame 2 (odd second) : normal emojis; fallback frame2 = □.
+        """
+        theme = self._theme_prefix(player)
+        try:
+            cols, term_h = os.get_terminal_size()
+        except Exception:
+            cols, term_h = 88, 22
+        if term_h < 5:
+            term_h = 5
+
+        # ── ANSI colour support detection (cached on player) ──────────────
+        if not hasattr(player, "_ansi_blink_ok"):
+            ct = os.environ.get("COLORTERM", "").lower()
+            tv = os.environ.get("TERM", "").lower()
+            player._ansi_blink_ok = bool(ct in ("truecolor","24bit") or
+                                         "color" in tv or "xterm" in tv or
+                                         "kitty" in tv or "iterm" in tv or
+                                         os.environ.get("KITTY_WINDOW_ID"))
+
+        # Which blink frame: alternates every ~0.6 seconds (gentler blink to
+        # avoid whole-screen flicker on slower terminals).
+        _frame1 = (int(time.time() * 1.6) % 2 == 0)
+
+        # ── Player emoji state ────────────────────────────────────────────
+        _now = time.time()
+        _last_mv = getattr(player, "last_move_time", 0.0)
+        _moving   = (_now - _last_mv) < 0.75
+        _has_spear = (getattr(player, "spear_type", None) is not None and
+                      getattr(player, "spear_dur", 0) > 0)
+        _has_shield = (getattr(player, "shield_type", None) is not None and
+                       getattr(player, "shield_dur_blocks", 0) > 0)
+        if _moving:
+            _PLAYER_EMOJI = "🚶"
+        elif _has_shield:
+            _PLAYER_EMOJI = "🛡️"
+        elif _has_spear:
+            _PLAYER_EMOJI = "🗡️"  # U+1F5E1 dagger — 2-wide; ⚔️ U+2694 is 1-wide in many terminals
+        else:
+            _PLAYER_EMOJI = "🧍"
+
+        # ── Map dimensions: classic 20×20 or adaptive ─────────────────────
+        _adaptive = getattr(player, "graphics_adaptive", False)
+        if _adaptive:
+            # Wider terminal → wider map.
+            # Each emoji tile is 2 display-cols wide, 1 row tall.
+            # Reserve ~40 cols for the right stats panel + separator + borders.
+            _reserved_w = 40
+            _max_map_w = max(10, (cols - _reserved_w) // 2)   # tiles wide
+            _max_map_h = max(6,  term_h - 2)                   # tiles tall
+            # Scale BOTH dimensions proportionally to stay ≤ 400 tiles.
+            # This preserves the terminal's natural wide-vs-tall ratio so a
+            # wider terminal always yields a wider map.
+            if _max_map_w * _max_map_h > 400:
+                _scale = (400 / (_max_map_w * _max_map_h)) ** 0.5
+                _max_map_w = max(10, int(_max_map_w * _scale))
+                _max_map_h = max(6,  int(_max_map_h * _scale))
+                # Trim any remaining single-tile excess from height only
+                while _max_map_w * _max_map_h > 400 and _max_map_h > 6:
+                    _max_map_h -= 1
+            # Prevent the map from overflowing the terminal vertically
+            _max_map_h = min(_max_map_h, term_h - 2)
+            # Guard against too-narrow maps (tile ratio < 0.6 means portrait)
+            if _max_map_w / max(1, _max_map_h) < 0.6:
+                _max_map_w = max(10, int(_max_map_h * 0.6))
+            MAP_TILE_W = _max_map_w
+            MAP_TILE_H = _max_map_h
+        else:
+            MAP_TILE_W = 20
+            MAP_TILE_H = 20
+
+        map_panel_w = MAP_TILE_W * 2 + 2   # 2 display cols per emoji + │…│
+
+        px, py = _world_tile(player.x, player.y)
+        try:
+            in_forest = biome_at(px, py) == "Forest"
+        except Exception:
+            in_forest = True
+        bg_empty = GRID_EMPTY if in_forest else "🟦"
+
+        # Player always at centre
+        hw = MAP_TILE_W // 2
+        hh = MAP_TILE_H // 2
+        ox = px - hw
+        oy = py - hh
+
+        # ── Build cell grid ───────────────────────────────────────────────
+        cells = {}
+        for gj in range(MAP_TILE_H):
+            for gi in range(MAP_TILE_W):
+                cells[(gi, gj)] = bg_empty
+
+        clusters = getattr(world, "clusters", {}) or {}
+        # ── Real-map layer ────────────────────────────────────────────────
+        # Build a single authoritative map: (tile_x, tile_y) → cluster.
+        # The emoji renderer AND the tile-info panel both read from THIS
+        # dict, so the emoji under the player can never disagree with the
+        # description of what the player is standing on. Last write wins
+        # when multiple clusters share an integer tile, exactly matching
+        # what a player visually sees on that tile.
+        tile_real_at = {}
+        for (cx, cy), cl in clusters.items():
+            tile_real_at[(int(cx), int(cy))] = cl
+
+        # Track which cluster was rendered onto the player's centre tile so
+        # the tile label always agrees with the emoji the player stands on.
+        player_cluster_gfx = tile_real_at.get((px, py))
+        for (tx, ty), cl in tile_real_at.items():
+            gi, gj = tx - ox, ty - oy
+            if not (0 <= gi < MAP_TILE_W and 0 <= gj < MAP_TILE_H):
+                continue
+            item = cl.get("real_item", "")
+            meta = cl.get("meta", {})
+            if meta.get("is_burning"):
+                icon = "🔥"
+            elif meta.get("is_ash"):
+                icon = "💨"
+            elif item == "wood":
+                icon = GRID_TREE
+            elif item == "rock":
+                icon = GRID_ROCK
+            elif item in ("fresh_water", "dirty_water", "freezing_water",
+                          "arctic_water", "freezing_dirty_water", "water"):
+                icon = GRID_WATER
+            elif item.endswith("berries") or item.endswith("berry") or "berr" in item:
+                icon = _cluster_icon(cl, GRID_BERRIES)
+            elif "mushroom" in item or item in ("black_trumpets", "spotted_mushrooms"):
+                icon = _cluster_icon(cl, GRID_MUSHROOMS)
+            elif item in ("fibergrass", "snow"):
+                icon = _cluster_icon(cl, GRID_GRASS)
+            elif item.startswith("moss"):
+                icon = _cluster_icon(cl, GRID_MOSS)
+            elif item == "catnip":
+                icon = _cluster_icon(cl, GRID_CATNIP)
+            else:
+                icon = _cluster_icon(cl, GRID_RESOURCE)
+            cells[(gi, gj)] = icon
+
+
+        for h in getattr(world, "houses", []) or []:
+            if h.get("hp", 0) <= 0:
+                continue
+            icon = HOUSE_DEFS.get(h.get("type", ""), {}).get("emoji", "🏠")
+            hgi, hgj = int(h["x"]) - ox, int(h["y"]) - oy
+            if 0 <= hgi < MAP_TILE_W and 0 <= hgj < MAP_TILE_H:
+                cells[(hgi, hgj)] = icon
+
+        # Track grot & animal cells for blink colouring
+        _grot_cells = set()
+        _animal_cells = {}
+        for a in getattr(world, "animals", []) or []:
+            agi = int(round(a["x"])) - ox
+            agj = int(round(a["y"])) - oy
+            if not (0 <= agi < MAP_TILE_W and 0 <= agj < MAP_TILE_H):
+                continue
+            atype = a.get("type", "")
+            if atype in ("grot", "grot_leader"):
+                icon = ANIMAL_DEFS.get(atype, {}).get("icon", "👹")
+                _grot_cells.add((agi, agj))
+            else:
+                icon = ANIMAL_DEFS.get(atype, {}).get("icon", "🐾")
+                _animal_cells[(agi, agj)] = icon
+            cells[(agi, agj)] = icon
+
+        # Place player at centre
+        cells[(hw, hh)] = _PLAYER_EMOJI
+
+        # ── Build map rows with blink colours ────────────────────────────
+        def _cell_display(gi, gj, raw_icon):
+            """Frame-alternating highlight for grots and animals.
+            Player never blinks (removes the main source of screen flicker)."""
+            if (gi, gj) == (hw, hh):
+                return raw_icon
+            if (gi, gj) in _grot_cells:
+                if _frame1 and player._ansi_blink_ok:
+                    return "🟥"
+                return raw_icon
+            if (gi, gj) in _animal_cells:
+                if _frame1 and player._ansi_blink_ok:
+                    return "🟡"
+                return raw_icon
+            return raw_icon
+
+        header_dashes = max(0, MAP_TILE_W * 2 - 6)
+        map_lines = ["┌─ MAP " + "─" * header_dashes + "┐"]
+        for gj in range(MAP_TILE_H):
+            row = "│"
+            for gi in range(MAP_TILE_W):
+                raw = cells.get((gi, gj), bg_empty)
+                # _cell2 forces every cell to exactly 2 terminal columns so
+                # rows stay aligned when emoji widths differ across terminals.
+                row += _cell2(_cell_display(gi, gj, raw))
+            row += "│"
+            map_lines.append(row)
+        map_lines.append("└" + "─" * (MAP_TILE_W * 2) + "┘")
+
+        while len(map_lines) < term_h:
+            map_lines.append(" " * map_panel_w)
+
+        # ── Right panel ───────────────────────────────────────────────────
+        right_w = max(10, cols - map_panel_w - 3)   # 3 = " │ " separator
+
+        # ── TOP SECTION ───────────────────────────────────────────────────
+        top = []
+        top.append(vfit("  🪐 9 PLANETS", right_w))
+        top.append(vfit("─" * right_w, right_w))
+
+        # Row: Day/Night + Day counter + Biome + distance to border
+        try:
+            day_label = "🌙 NIGHT" if player.time_of_day == "night" else "☀️ DAY"
+            _bm_lbl   = "🌲 Forest" if in_forest else "❄️ Arctic"
+            try:
+                _brd_d   = int(dist_to_border(px, py))
+                _brd_lbl = f"  🧭{_brd_d:+d}m"
+            except Exception:
+                _brd_lbl = ""
+            top.append(vfit(f"  {day_label}  Day {int(getattr(player,'day',1))}  {_bm_lbl}{_brd_lbl}", right_w))
+        except Exception:
+            top.append(" " * right_w)
+
+        # Vital stats
+        try:
+            hp  = float(player.health);   mhp = float(player.max_health)
+            hun = float(player.hunger);   thi = float(player.thirst)
+            ene = float(player.energy);   fat = float(player.fatigue)
+        except Exception:
+            hp = mhp = hun = thi = ene = fat = 0.0
+
+        top.append(vfit(f"  ❤️  {int(hp)}/{int(mhp)}  🍖 {int(hun)}  💧 {int(thi)}", right_w))
+        # Shift the energy icon one terminal column right.  Do not alter any
+        # map-cell coordinates or emoji placement; this only affects the HUD.
+        top.append(vfit(f"       ⚡ {int(ene)}   😴 {int(fat)}", right_w))
+
+        # Temperature + Coins + Points
+        try:
+            temp_str = _temp_label(player.temp, player)
+        except Exception:
+            temp_str = "?°"
+        try:
+            coins  = int(player.coins)
+            points = int(getattr(player, "points", 0))
+        except Exception:
+            coins = 0; points = 0
+        top.append(vfit(f"  🌡  {temp_str}  💰 {coins}  🏆 {points}pts", right_w))
+
+        # Player state + equipped armor
+        state_icons = {"🧍": "Idle", "🚶": "Moving", "🗡️": "Armed", "🛡️": "Shielded"}
+        _state_lbl  = state_icons.get(_PLAYER_EMOJI, "")
+        _armor      = getattr(player, "wearing", None) or ""
+        _armor_disp = {"light_armor": "🛡️Lite", "medium_armor": "🛡️Med",
+                       "heavy_armor": "🛡️Hvy"}.get(_armor, "")
+        _armor_dur  = getattr(player, "armor_dur", 0)
+        if _armor_disp and _armor_dur > 0:
+            _armor_disp += f"({int(_armor_dur)})"
+        _state_str = f"  {_PLAYER_EMOJI} {_state_lbl}"
+        if _armor_disp:
+            _state_str += f"  {_armor_disp}"
+        top.append(vfit(_state_str, right_w))
+
+        # Equipped spear (name, durability %, poison indicator)
+        try:
+            _spear_t = getattr(player, "spear_type", None)
+            if _spear_t:
+                _sdur = getattr(player, "spear_dur", 0)
+                _smax = SPEAR_DEFS.get(_spear_t, {}).get("dur", 100)
+                _spct = int(100 * max(0, _sdur) / max(1, _smax))
+                _sico = SPEAR_DEFS.get(_spear_t, {}).get("icon", "🗡️")
+                _spois = " ☠️" if getattr(player, "spear_poison_strikes", 0) > 0 else ""
+                _sname = _spear_t.replace("_", " ").title()
+                top.append(vfit(f"  {_sico} {_sname} {_spct}%{_spois}", right_w))
+        except Exception:
+            pass
+
+        # Diseases
+        try:
+            _dz = getattr(player, "diseases", {}) or {}
+            if _dz:
+                top.append(vfit("  ☣️  " + ", ".join(DISEASE_DISPLAY.get(d, d) for d in _dz), right_w))
+        except Exception:
+            pass
+
+        # Active crafting task
+        try:
+            if player.active_tasks:
+                t   = player.active_tasks[0]
+                rem = (t.get("paused_remaining", max(0, int(t.get("end", 0) - time.time())))
+                       if paused else max(0, int(t.get("end", 0) - time.time())))
+                top.append(vfit(f"  🔨 {t['item'].replace('_',' ').title()} ({rem}s)", right_w))
+        except Exception:
+            pass
+
+        # Resting state
+        try:
+            if getattr(player, "resting", False):
+                _rest_icon = {"campfire": "🔥", "house_bed": "🛏️",
+                              "house_floor": "🏠"}.get(getattr(player, "rest_mode", ""), "😴")
+                top.append(vfit(f"  {_rest_icon} Resting…", right_w))
+        except Exception:
+            pass
+
+        # Paused flag + trap status
+        if paused:
+            top.append(vfit("  ⏸️  PAUSED", right_w))
+        try:
+            setting_t = sum(1 for tr in (player.traps or []) if tr.get("status") == "setting")
+            caught_t  = sum(1 for tr in (player.traps or []) if tr.get("status") == "caught")
+            if caught_t or setting_t:
+                _tp = []
+                if caught_t:  _tp.append(f"🟢{caught_t} ready")
+                if setting_t: _tp.append(f"⏳{setting_t} setting")
+                top.append(vfit("  🪤 " + "  ".join(_tp), right_w))
+        except Exception:
+            pass
+
+        # Messages — word-wrapped so nothing is truncated
+        top.append(" " * right_w)
+        try:
+            recent = [m for m in (msg or []) if m.strip()][-3:]
+            if recent:
+                top.append(vfit("  💬", right_w))
+                _wrap_w = max(1, right_w - 4)
+                for m in recent:
+                    for wl in vwrap(m, _wrap_w)[:2]:
+                        top.append(vfit("    " + wl, right_w))
+        except Exception:
+            pass
+
+        # ── BOTTOM SECTION ────────────────────────────────────────────────
+        # Single source of truth: whatever cluster the emoji renderer put
+        # under the player is exactly what the tile-info panel describes.
+        cur_cluster = player_cluster_gfx
+        try:
+            if cur_cluster and cur_cluster.get("is_identified"):
+                tile_desc = f"{display_item_name(cur_cluster.get('real_item',''))} x{cur_cluster.get('qty',0)}"
+            elif cur_cluster:
+                _ri  = cur_cluster.get("real_item", "") or ""
+                _qty = cur_cluster.get("qty", 0)
+                _ri_l = _ri.lower()
+                if any(w in _ri_l for w in ("berr", "berry")):
+                    _cat = "Berries"
+                elif any(w in _ri_l for w in ("mushroom", "trumpet", "cap")):
+                    _cat = "Mushroom"
+                elif _ri_l == "wood":
+                    _cat = "Wood"
+                elif _ri_l == "rock":
+                    _cat = "Rock"
+                elif any(w in _ri_l for w in ("water", "drink")):
+                    _cat = "Water Source"
+                elif any(w in _ri_l for w in ("moss",)):
+                    _cat = "Moss"
+                elif any(w in _ri_l for w in ("fiber", "grass", "herb", "snow")):
+                    _cat = "Plants"
+                elif any(w in _ri_l for w in ("catnip", "nip")):
+                    _cat = "Herb"
+                else:
+                    _cat = "Resource"
+                tile_desc = f"❓ Unknown {_cat}.  Qty: {_qty}"
+            else:
+                tile_desc = "Forest — clear" if in_forest else "Arctic — clear"
+        except Exception:
+            tile_desc = "?"
+
+        try:
+            setting_t = sum(1 for tr in (player.traps or []) if tr.get("status") == "setting")
+            caught_t  = sum(1 for tr in (player.traps or []) if tr.get("status") == "caught")
+            trap_parts = []
+            if caught_t:  trap_parts.append(f"🟢{caught_t}")
+            if setting_t: trap_parts.append(f"⏳{setting_t}")
+            trap_pfx = f"🪤 {' '.join(trap_parts)} " if trap_parts else ""
+        except Exception:
+            trap_pfx = ""
+
+        prompt_pfx  = trap_pfx + prompt
+        avail_buf   = max(0, right_w - vlen(prompt_pfx))
+        buf_visible = vtrunc(buf, avail_buf)
+
+        bottom = [
+            vfit(f"  📍 @({px},{py}): {tile_desc}", right_w),
+            vfit(f"{prompt_pfx}{buf_visible}", right_w),
+        ]
+
+        # ── MIDDLE SECTION: optional commands panel ───────────────────────
+        show_cmds = getattr(player, "show_commands", True)
+        available = max(0, term_h - len(top) - len(bottom))
+        cmd_lines = []
+
+        # Which tab index is active (from game loop via player transient attr)
+        _gm_tab_idx = getattr(player, "_gm_tab_idx", -1)
+        # Build flat list of typeable command tokens matching _TAB_CMDS order
+        _tab_cmd_tokens = [
+            tok for _raw, _ in SIDEBAR_COMMANDS
+            for tok in [_raw.split("/")[0].split("<")[0].strip()]
+            if tok and any(c.isalpha() for c in tok)
+        ]
+
+        if show_cmds:
+            # Header always shows the current tab selection when active
+            if 0 <= _gm_tab_idx < len(_tab_cmd_tokens):
+                _tab_hint = f" ↹ {_tab_cmd_tokens[_gm_tab_idx]}"
+            else:
+                _tab_hint = " ↹=cycle"
+            cmd_lines.append(vfit(f"  📜 COMMANDS{_tab_hint}", right_w))
+            cmd_lines.append(vfit("  " + "─" * max(0, right_w - 2), right_w))
+            # Single-column layout — one command per line with its description.
+            # Prefix the currently tab-selected command with ▶ for visibility.
+            ck_w = max(6, min(20, right_w // 3))
+            cd_w = max(1, right_w - ck_w - 4)
+            # Compute scroll offset so the tab-highlighted command is always visible
+            _content_h = max(1, available - 2)   # 2 rows used by header + separator
+            _all_scmds = list(SIDEBAR_COMMANDS)
+            if 0 <= _gm_tab_idx < len(_tab_cmd_tokens):
+                _tab_tok = _tab_cmd_tokens[_gm_tab_idx]
+                _hi_idx = next(
+                    (i for i, (_rc, _) in enumerate(_all_scmds)
+                     if _rc.split("/")[0].split("<")[0].strip() == _tab_tok),
+                    0
+                )
+                # Keep highlighted row in the middle third of the visible area
+                _scroll_off = max(0, _hi_idx - _content_h // 3)
+                # Don't scroll past the end
+                _scroll_off = min(_scroll_off, max(0, len(_all_scmds) - _content_h))
+            else:
+                _scroll_off = 0
+            _visible_cmds = _all_scmds[_scroll_off:]
+            # Scroll indicator
+            if _scroll_off > 0:
+                cmd_lines.append(vfit(f"  ▲ {_scroll_off} more above", right_w))
+            for _raw_cmd, _desc in _visible_cmds:
+                if len(cmd_lines) >= available:
+                    break
+                _tok = _raw_cmd.split("/")[0].split("<")[0].strip()
+                _is_tab = (any(c.isalpha() for c in _tok) and
+                           0 <= _gm_tab_idx < len(_tab_cmd_tokens) and
+                           _tab_cmd_tokens[_gm_tab_idx] == _tok)
+                _pfx = "▶ " if _is_tab else "  "
+                _line = _pfx + vfit(_raw_cmd, ck_w) + " " + vfit(_desc, cd_w)
+                cmd_lines.append(vfit(_line, right_w))
+            _remaining = len(_all_scmds) - _scroll_off - len(_visible_cmds[:_content_h])
+            if _remaining > 0 and len(cmd_lines) < available:
+                cmd_lines.append(vfit(f"  ▼ {_remaining} more below  (↹ to scroll)", right_w))
+        else:
+            cmd_lines.append(vfit("  📜 COMMANDS hidden  (↹ still cycles)", right_w))
+            cmd_lines.append(vfit("  type 'commands' to show panel", right_w))
+
+        while len(cmd_lines) < available:
+            cmd_lines.append(" " * right_w)
+        cmd_lines = cmd_lines[:available]
+
+        right = (top + cmd_lines + bottom)[:term_h]
+
+        # ── Combine panels and write ──────────────────────────────────────
+        # vfit on both sides guarantees the │ separator is always at the same
+        # column regardless of emoji-width variance in the map tile cells.
+        sep = " │ "
+        out = []
+        for i in range(term_h):
+            left_s  = map_lines[i] if i < len(map_lines) else " " * map_panel_w
+            right_s = right[i]     if i < len(right)     else " " * right_w
+            out.append(vfit(left_s, map_panel_w) + sep + vfit(right_s, right_w))
+
+        final = "\033[?25l\033[H" + theme + "\033[H" + "\033[K\r\n".join([vtrunc(str(l), cols).rstrip() for l in out]) + "\033[K"
+        sys.stdout.write(final + "\033[J")
+
+        # ── ANSI absolute-position fixup for map cells ────────────────────
+        # Terminal emoji fonts often render individual glyphs a pixel or two
+        # wider/narrower than exactly 2 character cells.  With sequential
+        # output that error accumulates across a row: a tile at column 13
+        # can end up visually at column 12 or 14, making up/down movement
+        # land on the wrong tile visually.
+        #
+        # Fix: after the normal screen paint, re-write every map cell using
+        # an explicit \033[row;col H absolute cursor-move.  Each cell is
+        # pinned to its exact grid column regardless of how the terminal
+        # rendered earlier cells in the same row.  The right border │ is
+        # re-stamped last so a wide final-cell glyph cannot bleed into the
+        # right panel.
+        _mfx = []
+        for _gj in range(MAP_TILE_H):
+            _row = _gj + 2          # ANSI 1-indexed row (row 1 = ┌─ MAP…┐)
+            for _gi in range(MAP_TILE_W):
+                _col = 2 + _gi * 2  # ANSI 1-indexed col (col 1 = left │)
+                _ic  = _cell2(_cell_display(_gi, _gj,
+                               cells.get((_gi, _gj), bg_empty)))
+                _mfx.append(f"\033[{_row};{_col}H{_ic}")
+            # Re-stamp the right border: col = map_panel_w (= MAP_TILE_W*2+2)
+            _mfx.append(f"\033[{_row};{map_panel_w}H│")
+        sys.stdout.write("".join(_mfx))
+
+        # Position cursor at end of prompt on the very last row
+        prompt_row  = term_h
+        cursor_col  = map_panel_w + len(sep) + vlen(prompt_pfx) + vlen(buf_visible) + 1
+        cursor_col  = max(1, min(cols, cursor_col))
+        sys.stdout.write(f"\033[{prompt_row};{cursor_col}H\033[?25h")
+        sys.stdout.flush()
+
     def render_main(self, header, scan, msg, prompt, buf, player=None, paused=False):
+        # Graphics Mode: completely bypass the normal renderer.
+        if player is not None and getattr(player, "graphics_mode", False):
+            _gm_world = getattr(self, "pause_context_world", None) or _g_world
+            try:
+                self._render_graphics_mode(msg, prompt, buf, player, paused, _gm_world)
+            except Exception as _gm_err:
+                import traceback as _tb
+                _err_txt = _tb.format_exc()
+                try:
+                    with open("/tmp/9p_gm_err.txt", "w") as _f:
+                        _f.write(_err_txt)
+                except Exception:
+                    pass
+                try:
+                    sys.stdout.write(f"\033[H\033[2J\033[1;1H  [GM ERROR — see /tmp/9p_gm_err.txt]\r\n  {_gm_err}\r\n  Press any key…")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+            # ALWAYS return — never fall through to normal mode in graphics mode.
+            return
+
         # Flicker-free repaint: hide cursor and home instead of clearing the whole screen.
         # The frame below is padded to terminal height and every line ends with \033[K,
         # then \033[J wipes anything below — no blank-then-draw flash while typing.
-        sys.stdout.write("\033[?25l\033[H")
+        theme = self._theme_prefix(player)
+        sys.stdout.write("\033[?25l\033[H" + theme)
         try: cols, term_h = os.get_terminal_size()
         except: cols, term_h = TERM_WIDTH, 24
         term_w = max(20, cols)  # Actual terminal width without capping
@@ -6166,6 +7480,11 @@ class Player:
         self.session_start = time.time()
         self.difficulty_mult = NORMAL_HUNGER_MULT
         self.fast_mode = False    # Fast Mode: Arctic at 1000, 3x faster crafting
+        self.terminal_theme = "dark"
+        self.graphics_mode = False
+        self.graphics_adaptive = False   # True = fit terminal; False = classic 20×20
+        self.show_commands = True        # True = show commands panel in graphics mode
+        self.last_move_time = 0.0        # real-time stamp of last player movement
         self.mode = "quest"
         # Spear
         self.spear_type = None
@@ -6694,8 +8013,8 @@ class Player:
         Validate and begin a crafting task.
         Returns (ok: bool, message: str).
         """
-        if self.active_tasks:
-            return False, "🔨 Already crafting! Wait for it to finish, or use the 'cancel' command."
+        # Queue additional crafts instead of blocking the player behind a single task.
+        # The task list already supports multiple concurrent crafts.
 
         # Station check
         station = recipe.get("station")
@@ -7043,7 +8362,7 @@ class World:
         if player.inventory.get("id_lens",0) > 0:
             player.inventory["id_lens"] -= 1
             cl["is_identified"] = True
-            cl["name"] = cl["real_item"].replace("_"," ").title()
+            cl["name"] = display_item_name(cl["real_item"])
             return True, f"🔍 Lens used! Identified as {cl['name']}."
         if player.energy < INSPECT_COST: return False, "⚡ Not enough energy (need 5)."
         player.energy -= INSPECT_COST
@@ -7051,7 +8370,7 @@ class World:
         chance = min(1.0, IDENTIFY_CHANCES.get(cl["real_item"],0.0) + player.inventory.get("textbook",0)*0.1)
         if random.random() <= chance:
             cl["is_identified"] = True
-            cl["name"] = cl["real_item"].replace("_"," ").title()
+            cl["name"] = display_item_name(cl["real_item"])
             return True, f"✅ Identified as {cl['name']}! ({cl['inspection_attempts']}/{MAX_INSPECTIONS})"
         return False, f"❌ Failed. ({cl['inspection_attempts']}/{MAX_INSPECTIONS} attempts used)"
 
@@ -9164,6 +10483,7 @@ def _house_turret_tick(house, world, player, msg, now):
             base_dmg = 20 if "cannon" in fu["type"] else 10
             dmg = int(base_dmg * ammo_mult)
             target["hp"] -= dmg
+            _flash_hit(target.get("type",""))
             aname = target["type"].replace("_"," ").title()
             msg.append(f"💣 {fu['type'].replace('_',' ').title()} hit {aname}! -{dmg} HP")
             # Flee radius
@@ -9512,6 +10832,7 @@ def enter_house_mode(term, player, world, house, weather, msg_out):
                     if practice_player.inventory.get("poison",0)>0:
                         practice_player.inventory["poison"] -= 1
                     target["hp"] -= dmg
+                    _flash_hit(target.get("type",""))
                     practice_player.spear_dur -= min(SPEAR_DEFS[active_spear].get("throw_cost", 20), practice_player.spear_dur)
                     if active_spear == "ice_spear":
                         practice_player.spear_dur = 0
@@ -9973,9 +11294,18 @@ def _tick_cat_companion(player, world, msg):
                             and math.hypot(a["x"]-player.x, a["y"]-player.y) <= 5.0), None)
         if approaching is not None:
             player.cat_approach_announced = True
-            msg.append("🧓 Old Man: Hohoho! The cats around here really are friendly! "
-                       "Drop meat or catnip to adopt them; drop catnip and they'll come running towards you!")
-            msg[:] = msg[-3:]
+            # Queue a full-screen popup (shown by main loop via player._pending_popup)
+            player._pending_popup = [
+                "🧓 Old Man speaks!",
+                "",
+                "  Hohoho!  The cats around here really ARE friendly!",
+                "",
+                "  • Drop some meat near a cat to tame it.",
+                "  • Drop catnip and the cat will come running to you.",
+                "  • Once tamed, a cat will follow and protect you!",
+                "",
+                "  Press Enter to continue.",
+            ]
     following_cat = next((a for a in world.animals if a.get("type")=="cat" and a.get("_following_player")), None)
     # If the cat fled during combat, try to bring it back once combat is over
     # and the return timer has elapsed.
@@ -10107,7 +11437,7 @@ GRID_BERRIES = "🫐"
 GRID_MUSHROOMS = "🍄"
 GRID_WATER = "💧"
 GRID_GRASS = "🌾"
-GRID_MOSS = "☘️"
+GRID_MOSS = "🌿"   # herb (U+1F33F) — unambiguously 2-wide; replaces ☘️ which is 1-wide in many terminals
 GRID_RESOURCE = "🌱"
 
 PREY_FLASH_TYPES = {
@@ -10145,7 +11475,7 @@ def _grid_calc_grot_energy(player):
 def _grid_terrain_factor(world, x, y):
     """Movement multiplier for rough terrain — trees slow, rocks slow more.
     Applies to grots so terrain affects them just like the player."""
-    xi = int(round(x)); yi = int(round(y))
+    xi, yi = _world_tile(x, y)
     factor = 1.0
     for (cx, cy), cl in world.clusters.items():
         item = cl.get("real_item", "")
@@ -10173,23 +11503,15 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
 
     # World resources/clusters in view
     for (cx,cy), cl in world.clusters.items():
-        gi = int(round(cx)) - grid_ox; gj = int(round(cy)) - grid_oy
+        gi, gj = int(cx) - grid_ox, int(cy) - grid_oy
         if not (0<=gi<GS and 0<=gj<GS): continue
         item = cl.get("real_item") or cl.get("meta",{}).get("item","")
-        if item == "wood":  # fallen tree = 2x2
-            for di in range(2):
-                for dj in range(2):
-                    p=(gi+di,gj+dj)
-                    if 0<=p[0]<GS and 0<=p[1]<GS:
-                        if cells.get(p,(None,0))[1] < 50:
-                            cells[p]=(GRID_TREE,50)
-        elif item == "rock":  # rock vein = 2x2
-            for di in range(2):
-                for dj in range(2):
-                    p=(gi+di,gj+dj)
-                    if 0<=p[0]<GS and 0<=p[1]<GS:
-                        if cells.get(p,(None,0))[1] < 30:
-                            cells[p]=(GRID_ROCK,30)
+        if item == "wood":  # 1×1 to match graphics-mode density
+            if cells.get((gi,gj),(None,0))[1] < 50:
+                cells[(gi,gj)] = (GRID_TREE, 50)
+        elif item == "rock":  # 1×1 to match graphics-mode density
+            if cells.get((gi,gj),(None,0))[1] < 30:
+                cells[(gi,gj)] = (GRID_ROCK, 30)
         elif item == "catnip":
             if cells.get((gi,gj),(None,0))[1] < 20:
                 cells[(gi,gj)]=(GRID_CATNIP,20)
@@ -10198,7 +11520,9 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
             # screen instead of reducing grid mode to trees and rocks.
             source_item = cl.get("meta", {}).get("item", item)
             category = cl.get("category", "")
-            if source_item in ("berries", "wild_berries", "sweet_berries", "sour_berries", "glowing_berries", "frostberry", "shimmer_frostberry", "poisonous_berry") or item in BERRY_ITEMS:
+            if (source_item == "poisonous_berry" or item == "poisonous_berry") and cl.get("is_identified"):
+                icon = "💀"  # U+1F480 skull — 2-wide; ☠️ U+2620 is 1-wide in many terminals
+            elif source_item in ("berries", "wild_berries", "sweet_berries", "sour_berries", "glowing_berries", "frostberry", "shimmer_frostberry", "poisonous_berry") or item in BERRY_ITEMS:
                 icon = GRID_BERRIES
             elif source_item in ("mushrooms", "mushroom_death_cap", "mystery_mushroom", "black_trumpets", "spotted_mushrooms") or item in MUSHROOM_ITEMS:
                 icon = GRID_MUSHROOMS
@@ -10224,10 +11548,9 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     # Player icon frame (visible 400ms / marker 100ms cycle = 500ms total)
     _p_frame_pos = (_now_a * 1000) % 500
     _p_marker = _p_frame_pos >= 400
-    # Grot ANSI: yellow/red every 0.2s
-    _g_color = "\033[33m" if int(_now_a*5) % 2 == 0 else "\033[31m"
-    _g_frame_pos = ((_now_a + 0.25) * 1000) % 500
-    _g_marker = _g_frame_pos >= 400
+    # Grot: blink bright red on/off every 0.25s
+    _g_color = "\033[91m" if int(_now_a*4) % 2 == 0 else "\033[0m"
+    _g_marker = False
     # Prey ANSI: green/cyan flash (offset phase) so rabbits/deer animate too
     _pr_color = "\033[32m" if int(_now_a*5 + 1) % 2 == 0 else "\033[36m"
     _pr_frame_pos = ((_now_a + 0.40) * 1000) % 500
@@ -10275,7 +11598,7 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     else:
         picon = "🧍"
     picon = f"{_p_color}{picon}{_ansi_reset}"
-    px = int(round(player.x)); py = int(round(player.y))
+    px, py = _world_tile(player.x, player.y)
     pgi = px - grid_ox; pgj = py - grid_oy
     if 0<=pgi<GS and 0<=pgj<GS:
         cells[(pgi,pgj)] = (picon, 100)
@@ -10309,7 +11632,7 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
         sidebar_content[GS - 6 + idx] = vtrunc(ll, SIDEBAR_W)
 
     for gj in range(GS):
-        row_cells = [cells.get((gi,gj),(GRID_EMPTY,0))[0] for gi in range(GS)]
+        row_cells = [_cell2(cells.get((gi,gj),(GRID_EMPTY,0))[0]) for gi in range(GS)]
         row_str = "".join(row_cells)
         side = sidebar_content[gj] if gj < len(sidebar_content) else ""
         lines.append(f"  {row_str} │ {vtrunc(side, SIDEBAR_W)}")
@@ -10358,8 +11681,9 @@ def run_grid_mode(term, player, world, initial_targets, msg_out=None):
     # e["_in_tree"] = depth (rounds spent in tree); at depth≥3 they escape
 
     def grid_origin():
-        ox = int(round(player.x)) - GRID_SIZE//2
-        oy = int(round(player.y)) - GRID_SIZE//2
+        px, py = _world_tile(player.x, player.y)
+        ox = px - GRID_SIZE//2
+        oy = py - GRID_SIZE//2
         return ox, oy
 
     def do_render(hint=""):
@@ -10769,8 +12093,9 @@ def run_grid_mode(term, player, world, initial_targets, msg_out=None):
                          or e.get("atk", 0) > 0 or e.get("type") in ("grot", "grot_leader"))
             if not is_target:
                 continue
-            d = max(abs(int(round(e["x"])) - int(round(player.x))),
-                    abs(int(round(e["y"])) - int(round(player.y))))
+            ptx, pty = _world_tile(player.x, player.y)
+            d = max(abs(int(round(e["x"])) - ptx),
+                    abs(int(round(e["y"])) - pty))
             if nearest_target_dist is None or d < nearest_target_dist:
                 nearest_target_dist = d
 
@@ -10853,7 +12178,7 @@ def run_grid_mode(term, player, world, initial_targets, msg_out=None):
             # Trees cost extra energy, rocks cost more; both are walkable.
             extra_cost = 0
             terrain_label = None
-            px_i = int(round(player.x)); py_i = int(round(player.y))
+            px_i, py_i = _world_tile(player.x, player.y)
             for (cx,cy),cl in world.clusters.items():
                 item=cl.get("real_item","")
                 if item not in ("wood","rock"): continue
@@ -11194,6 +12519,7 @@ def handle_combat_command(player, world, act, arg, msg, term=None):
         sdef = SPEAR_DEFS.get(player.spear_type, {})
         dmg = sdef.get("strike", 0) * (2 if player.inventory.get("poison",0)>0 else 1)
         target["hp"] -= dmg
+        _flash_hit(target.get("type",""))
         # Sync HP back to world animal reference so damage persists across combats
         try:
             target["ref"]["hp"] = target["hp"]
@@ -11258,6 +12584,7 @@ def handle_combat_command(player, world, act, arg, msg, term=None):
             poison_mult = 2 if player.spear_poison_throw else 1
             dmg = max(1, int(sdef.get("throw", 0) * hit_mult * poison_mult))
             target["hp"] -= dmg
+            _flash_hit(target.get("type",""))
             try: target["ref"]["hp"] = target["hp"]
             except Exception: pass
             player.spear_dur -= min(sdef.get("throw_cost", 0), player.spear_dur)
@@ -11505,6 +12832,10 @@ def do_save(player, world, save_path, biome, dead=False, death_reason="", paused
             "name": name,
             "biome": cur_biome,
             "debug": bool(getattr(player, "debug_mode", False)),
+            "terminal_theme": getattr(player, "terminal_theme", "dark"),
+            "graphics_mode": bool(getattr(player, "graphics_mode", False)),
+            "graphics_adaptive": bool(getattr(player, "graphics_adaptive", False)),
+            "show_commands": bool(getattr(player, "show_commands", True)),
             "last_played": time.time(),
             "health": player.health,
             "coins": player.coins,
@@ -11892,7 +13223,7 @@ def pick_save():
                     try:
                         del_idx = int(raw[1:])
                         if 1 <= del_idx <= total_live:
-                            path_d, _, _, _ = live_entries[del_idx - 1]
+                            path_d, _, _, _, _ = live_entries[del_idx - 1]
                             sname = os.path.splitext(os.path.basename(path_d))[0]
                             sys.stdout.write(f"  Delete save '{sname}'? [y/N]: ")
                             sys.stdout.flush()
@@ -11922,7 +13253,7 @@ def pick_save():
                     idx = int(raw)
                     if 1 <= idx <= total_live:
                         path, biome, save_debug, _, _ = live_entries[idx - 1]
-                        return path, biome, False, None, False, 1.0, True, dev_state["on"], False, save_debug
+                        return path, biome, False, None, False, 1.0, True, dev_state["on"], False, save_debug, "dark", False, False
                     if idx == new_idx:
                         break
                 if raw:
@@ -12026,6 +13357,67 @@ def pick_save():
         print("  ⚠️  Invalid choice. Enter 1 or 2.")
 
     print()
+    print("  🖼️  DISPLAY MODE:")
+    print("  1. Standard — normal terminal view.")
+    print("  2. Graphics — shows a live mini-map of your surroundings.")
+    print("               Auto-zooms the terminal for the best experience.")
+    print("               All gameplay remains command-driven (no extra keypresses).")
+    chosen_graphics = False
+    while True:
+        try:
+            raw_graphics = input("  Choose display mode [1/2]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            sys.exit(0)
+        if raw_graphics in ("1", ""):
+            chosen_graphics = False
+            break
+        if raw_graphics == "2":
+            chosen_graphics = True
+            break
+        print("  ⚠️  Invalid choice. Enter 1 or 2.")
+
+    chosen_adaptive = False
+    if chosen_graphics:
+        print()
+        print("  📐 GRAPHICS MAP SIZE:")
+        print("  1. Classic  — fixed 20×20 grid (always the same, like the original).")
+        print("  2. Adaptive — fills your terminal! Wider terminal = more map visible.")
+        print("               Up to 400 tiles at once. Aspect ratio stays balanced.")
+        while True:
+            try:
+                raw_adaptive = input("  Choose map size [1/2]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                sys.exit(0)
+            if raw_adaptive in ("1", ""):
+                chosen_adaptive = False
+                break
+            if raw_adaptive == "2":
+                chosen_adaptive = True
+                break
+            print("  ⚠️  Invalid choice. Enter 1 or 2.")
+
+    chosen_theme = "dark"
+    if not chosen_graphics:
+        print()
+        print("  🖥️  TERMINAL THEME:")
+        print("  1. Dark Mode — always dark with white letters.")
+        print("  2. Day/Night Mode — white by day, black by night.")
+        while True:
+            try:
+                raw_theme = input("  Choose terminal theme [1/2]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                sys.exit(0)
+            if raw_theme in ("1", ""):
+                chosen_theme = "dark"
+                break
+            if raw_theme == "2":
+                chosen_theme = "day_night"
+                break
+            print("  ⚠️  Invalid choice. Enter 1 or 2.")
+    else:
+        print("  ℹ️  Terminal theme: Dark Mode (fixed for Graphics Mode).")
+
+    print()
     print("  🥊 COMBAT SETTING:")
     print("  1. Normal — standard encounters.")
     print("  2. Combat — doubled monster spawn (more dangerous).")
@@ -12106,7 +13498,7 @@ def pick_save():
         print("  ⚠️  Please answer y or n.")
 
     print()
-    return path, chosen_biome, True, chosen_mode, quick_tutorial, difficulty_mult, audio_enabled, dev_state["on"], chosen_fast, debug_mode
+    return path, chosen_biome, True, chosen_mode, quick_tutorial, difficulty_mult, audio_enabled, dev_state["on"], chosen_fast, debug_mode, chosen_theme, chosen_graphics, chosen_adaptive
 
 
 
@@ -12119,9 +13511,8 @@ def main():
 
     save_path = None; biome = "Forest"
     try:
-        save_path, biome, is_new, chosen_mode, quick_tutorial, difficulty_mult, audio_enabled, dev_mode, fast_mode, debug_mode = pick_save()
+        save_path, biome, is_new, chosen_mode, quick_tutorial, difficulty_mult, audio_enabled, dev_mode, fast_mode, debug_mode, chosen_theme, chosen_graphics, chosen_adaptive = pick_save()
         global _DEV_MODE; _DEV_MODE = bool(dev_mode)
-        _stop_menu_music()
         term = Terminal()
         if not term.using_windows_fallback:
             termios.tcflush(term.fd, termios.TCIFLUSH)
@@ -12183,6 +13574,9 @@ def main():
         player.difficulty_mult = difficulty_mult
         player.fast_mode = bool(fast_mode)
         player.debug_mode = bool(debug_mode)
+        player.terminal_theme = chosen_theme or "dark"
+        player.graphics_mode = bool(chosen_graphics)
+        player.graphics_adaptive = bool(chosen_adaptive)
         world = World(biome, "day")
         world.biome = biome
         global _g_world; _g_world = world
@@ -12204,7 +13598,14 @@ def main():
             sound.play_environment(world.biome)
         _stop_menu_music()
         weather = WeatherSystem()
+        term.theme_mode = player.terminal_theme
         term.pause_context_player = player
+        # Adaptive mode: just verify terminal is large enough for any map.
+        # Classic mode: target 88×22 for the 20×20 fixed grid.
+        if getattr(player, "graphics_adaptive", False):
+            graphics_zoomed = _attempt_graphics_mode(player, target_cols=60, target_rows=16)
+        else:
+            graphics_zoomed = _attempt_graphics_mode(player, target_cols=88, target_rows=22)
         term.pause_context_world = world
         term.pause_context_weather = weather
 
@@ -12225,6 +13626,10 @@ def main():
                 world.animals = data.get("world", {}).get("animals", [])
                 world.houses = data.get("world", {}).get("houses", [])
                 player.debug_mode = bool(data.get("meta", {}).get("debug", False))
+                player.terminal_theme = data.get("meta", {}).get("terminal_theme", getattr(player, "terminal_theme", "dark"))
+                player.graphics_mode = bool(data.get("meta", {}).get("graphics_mode", getattr(player, "graphics_mode", False)))
+                player.graphics_adaptive = bool(data.get("meta", {}).get("graphics_adaptive", getattr(player, "graphics_adaptive", False)))
+                player.show_commands = bool(data.get("meta", {}).get("show_commands", getattr(player, "show_commands", True)))
                 for a in world.animals:
                     a["last_move"] = time.time()
                 # Fix active_tasks end times: if task end is in the past, keep 1s left
@@ -12253,6 +13658,11 @@ def main():
             msg = ["🎮 Explorer Combat Mode active. Quests are disabled and monster spawn is higher."]
         else:
             msg = ["🎮 Explorer Mode active. Quests are disabled and you can roam freely."]
+        if getattr(player, "graphics_mode", False):
+            if graphics_zoomed:
+                msg.append("🖼️ Graphics Mode active — terminal auto-zoom was attempted.")
+            else:
+                msg.append("🖼️ Graphics Mode active — terminal zoom could not be adjusted automatically.")
 
         # Finish the loading animation and restore real stdout BEFORE the
         # interactive tutorial / first quest update. These steps print prompts
@@ -12308,6 +13718,13 @@ def main():
     player.last_day = time.time()
     weather.last_evap = time.time()
     buf = ""; game_over = False; paused = False; crashed = False; last_render = time.time(); last_auto_save = time.time()
+    # Tab-completion state: index into _TAB_CMDS (-1 = inactive)
+    _tab_idx = -1
+    _TAB_CMDS = [
+        tok for _raw, _ in SIDEBAR_COMMANDS
+        for tok in [_raw.split("/")[0].split("<")[0].strip()]
+        if tok and any(c.isalpha() for c in tok)
+    ]
     player_died = False; death_reason = ""
 
     def refresh():
@@ -12546,6 +13963,18 @@ def main():
                                 msg.append(brk)
                                 if sound and sound.enabled: sound.play_tool_break()
                                 break
+                    if real == "rock":
+                        for _ in range(qty):
+                            roll = random.random()
+                            if roll < 0.005:
+                                player.inventory["gold_ore"] = player.inventory.get("gold_ore", 0) + 1
+                                msg.append("✨ Gold Ore!")
+                            elif roll < 0.105:
+                                player.inventory["copper_ore"] = player.inventory.get("copper_ore", 0) + 1
+                                msg.append("🔶 Copper Ore!")
+                            elif roll < 0.255:
+                                player.inventory["iron_ore"] = player.inventory.get("iron_ore", 0) + 1
+                                msg.append("⚙️ Iron Ore!")
                     if cl.get("meta", {}).get("hazard"):
                         hk = cl["meta"].get("hazard_key"); h = HAZARDS.get(hk, {}); base_dmg = h.get("dmg", 0)
                         hits = 0; blocked = 0; total_dmg = 0; broken = False
@@ -12599,7 +14028,12 @@ def main():
                     msg.append(f"✅ Gathering finished! Energy cost = {energy_cost}.")
                     if sound and sound.enabled:
                         sound.stop_gather()
-                        sound.play_gather_all()
+                        if real == "wood":
+                            sound.play_chop()
+                        elif real in ("rock", "ice_chunk"):
+                            sound.play_pickaxe()
+                        else:
+                            sound.play_collect()
                     player.gather_all = None
                     qt_on_event(term, player, world, "gather_all_done", item=real)
                 msg = msg[-3:]
@@ -12898,8 +14332,9 @@ def main():
                     msg.append("😴 Too exhausted to walk. Rest now!"); msg = msg[-3:]; rn = True
                 else:
                     dx = 1 if key=='RIGHT' else -1 if key=='LEFT' else 0
-                    dy = 1 if key=='UP' else -1 if key=='DOWN' else 0
+                    dy = -1 if key=='UP' else 1 if key=='DOWN' else 0
                     prev_biome = biome_at(player.x, player.y)
+                    player.last_move_time = time.time()
                     m, d = player.travel_to(dx, dy)
                     if d == -1: msg.append("😮‍💨 Exhausted!")
                     elif d > 0.01:
@@ -12978,18 +14413,74 @@ def main():
                 # ---- HELP ----
                 if act == "help":
                     page_keys = list(HELP_PAGES.keys())
-                    menu_lines = ["📖 HELP MENU", "─"*TERM_WIDTH]
-                    for i,k in enumerate(page_keys,1): menu_lines.append(f"  {i}. {k}")
-                    menu_lines += ["", "  Press a number key. Press Enter to close."]
-                    term.show_menu(menu_lines)
+                    # Paginated help: show TOC, then page content in terminal-height pages
+                    def _help_show_toc():
+                        try: _tw = os.get_terminal_size().columns
+                        except Exception: _tw = TERM_WIDTH
+                        _tw = max(40, _tw)
+                        lines = ["📖 HELP MENU", "─" * _tw]
+                        for i, k in enumerate(page_keys, 1):
+                            lines.append(f"  {i}. {k}")
+                        lines += ["", "  Press a number to open a page.  0 or Enter to close."]
+                        term.show_menu(lines)
+                    def _help_show_page(page_key, sub_page=0):
+                        try: _tw, _th = os.get_terminal_size()
+                        except Exception: _tw, _th = TERM_WIDTH, 24
+                        _tw = max(40, _tw); _th = max(6, _th)
+                        content_lines = HELP_PAGES[page_key].split('\n')
+                        page_h = max(4, _th - 5)   # lines of content per screen
+                        total_sub = max(1, (len(content_lines) + page_h - 1) // page_h)
+                        sub_page = max(0, min(sub_page, total_sub - 1))
+                        start = sub_page * page_h
+                        visible = content_lines[start: start + page_h]
+                        idx_num = page_keys.index(page_key) + 1
+                        header = f"📖 {page_key}  [{sub_page+1}/{total_sub}]"
+                        nav = "  N=next page  P=prev page  B=back to menu  Q=close"
+                        out_lines = [header, "─" * _tw] + visible
+                        while len(out_lines) < _th - 1:
+                            out_lines.append("")
+                        out_lines.append(nav)
+                        term.show_menu(out_lines)
+                        return total_sub, sub_page
+                    _help_show_toc()
+                    _cur_page_key  = None
+                    _cur_sub_page  = 0
+                    _total_sub     = 1
                     while True:
                         ch = term.get_key_no_flush(0.5)
-                        if ch in ('\r','\n','ESC'):
-                            sys.stdout.write("\033[2J"); sys.stdout.flush(); break
-                        if ch and ch.isdigit():
-                            idx = int(ch)
-                            if 1 <= idx <= len(page_keys):
-                                term.print_page(HELP_PAGES[page_keys[idx-1]].split('\n')); break
+                        if ch is None:
+                            continue
+                        if _cur_page_key is None:
+                            # TOC mode
+                            if ch in ('\r', '\n', '0', 'ESC', 'q', 'Q'):
+                                sys.stdout.write("\033[2J"); sys.stdout.flush(); break
+                            if ch and ch.isdigit():
+                                idx = int(ch)
+                                if 1 <= idx <= len(page_keys):
+                                    _cur_page_key = page_keys[idx - 1]
+                                    _cur_sub_page = 0
+                                    _total_sub, _cur_sub_page = _help_show_page(_cur_page_key, _cur_sub_page)
+                        else:
+                            # Page-view mode
+                            if ch in ('b', 'B', 'ESC'):
+                                _cur_page_key = None
+                                _help_show_toc()
+                            elif ch in ('q', 'Q', '\r', '\n', '0'):
+                                sys.stdout.write("\033[2J"); sys.stdout.flush(); break
+                            elif ch in ('n', 'N', 'DOWN'):
+                                if _cur_sub_page < _total_sub - 1:
+                                    _cur_sub_page += 1
+                                _total_sub, _cur_sub_page = _help_show_page(_cur_page_key, _cur_sub_page)
+                            elif ch in ('p', 'P', 'UP'):
+                                if _cur_sub_page > 0:
+                                    _cur_sub_page -= 1
+                                _total_sub, _cur_sub_page = _help_show_page(_cur_page_key, _cur_sub_page)
+                            elif ch and ch.isdigit():
+                                idx = int(ch)
+                                if 1 <= idx <= len(page_keys):
+                                    _cur_page_key = page_keys[idx - 1]
+                                    _cur_sub_page = 0
+                                    _total_sub, _cur_sub_page = _help_show_page(_cur_page_key, _cur_sub_page)
                     rn = True
                 # ---- TUTORIALS (re-read unlocked tutorials) ----
                 elif act in ("tutorials", "tutorial"):
@@ -13632,6 +15123,7 @@ def main():
                                                 dmg = max(1, int(sdef.get("throw", 0) * hit_mult * (2 if player.inventory.get("poison",0)>0 else 1)))
                                                 if player.inventory.get("poison",0)>0: player.inventory["poison"] -= 1
                                                 target["hp"] -= dmg
+                                                _flash_hit(target.get("type",""))
                                                 player.spear_dur -= min(sdef.get("throw_cost", 20), player.spear_dur)
                                                 if active_spear == "ice_spear": player.spear_dur = 0
                                                 zone_desc = {"head":"HEAD HIT","body":"body hit","graze":"graze","near_miss":"near miss"}.get(hit_zone,"hit")
@@ -13646,6 +15138,7 @@ def main():
                                                 dmg = sdef.get("strike", 0) * (2 if player.inventory.get("poison",0)>0 else 1)
                                                 if player.inventory.get("poison",0)>0: player.inventory["poison"] -= 1
                                                 target["hp"] -= dmg
+                                                _flash_hit(target.get("type",""))
                                                 player.spear_dur -= sdef.get("strike_cost", dmg)
                                                 msg.append(f"⚔️ Strike! -{dmg} HP ({max(0,target['hp']):.0f} HP left)")
                                         if player.spear_dur <= 0:
@@ -14141,7 +15634,7 @@ def main():
 
                 # ---- EAT / DRINK ----
                 elif act in ("eat","drink") and arg:
-                    if player.active_tasks:
+                    if player.active_tasks and not (getattr(player, "fast_mode", False) and act in ("eat", "drink")):
                         msg.append("🔨 Can't eat while crafting! Wait for it to finish, or use the 'cancel' command."); msg = msg[-3:]; continue
                     raw_in = arg.lower().strip(); raw_k = raw_in.replace(" ","_")
                     real_item = CONSUME_ALIASES.get(raw_in, CONSUME_ALIASES.get(raw_k, raw_k))
@@ -14712,6 +16205,7 @@ def main():
                                 mult = 2 if player.spear_poison_strikes > 0 else 1
                                 dmg = sdef["strike"] * mult
                                 target["hp"] -= dmg
+                                _flash_hit(target.get("type",""))
                                 player.spear_dur -= sdef.get("strike_cost", dmg)
                                 pmark = " ☠️" if mult == 2 else ""
                                 if player.spear_poison_strikes > 0:
@@ -14759,6 +16253,7 @@ def main():
                                 mult = 2 if player.spear_poison_throw else 1
                                 dmg = sdef["throw"] * mult
                                 target["hp"] -= dmg
+                                _flash_hit(target.get("type",""))
                                 player.spear_dur -= throw_cost
                                 if player.spear_type == "ice_spear":
                                     player.spear_dur = 0
@@ -14779,6 +16274,15 @@ def main():
                                 else:
                                     animal_retaliation(player, world, target, msg)
 
+                elif act in ("commands","togglecommands","toggle commands","showcmds","hidecmds"):
+                    if not getattr(player, "graphics_mode", False):
+                        msg.append("ℹ️ 'commands' toggle only applies in Graphics Mode.")
+                    else:
+                        player.show_commands = not getattr(player, "show_commands", True)
+                        state = "ON (showing commands panel)" if player.show_commands else "OFF (more map breathing room)"
+                        msg.append(f"📜 Commands panel: {state}")
+                    msg = msg[-3:]; rn = True; continue
+
                 elif cmd == "save":
                     try:
                         do_save(player, world, save_path, biome, paused=paused)
@@ -14791,7 +16295,7 @@ def main():
                                 "recipes","shop","buy","sell","quests","achievements","explain","inspect",
                                 "identify","trap","traps","wear","remove","equip","unequip","fire","walk","go",
                                 "cancel","pause","resume","save","quit","exit","bandage","apply","status","filter",
-                                "tutorials","tutorial"]
+                                "tutorials","tutorial","commands"]
                     close = [c for c in all_cmds if act and (act in c or c in act or sum(a==b for a,b in zip(act,c)) >= max(1, min(len(act),len(c))-2))]
                     if close:
                         if act and any(c.isalnum() for c in act):
@@ -14805,12 +16309,35 @@ def main():
                             msg.append("❓ Unknown command. Type 'help' for guide.")
                 msg = msg[-3:]
 
+            elif key == '\t':
+                # Tab cycles through typeable commands in SIDEBAR_COMMANDS
+                if _TAB_CMDS:
+                    _tab_idx = (_tab_idx + 1) % len(_TAB_CMDS)
+                    buf = _TAB_CMDS[_tab_idx]
+                    player._gm_tab_idx = _tab_idx   # pass to renderer for highlight
+                    rn = True
             elif key in ('\x7f','\x08'):
-                if buf: buf = buf[:-1]; rn = True
+                if buf:
+                    buf = buf[:-1]
+                    _tab_idx = -1
+                    player._gm_tab_idx = -1
+                rn = True
             elif key == '\x03': game_over = True
-            elif key and key.isprintable() and len(key) == 1: buf += key; rn = True
+            elif key and key.isprintable() and len(key) == 1:
+                buf += key
+                _tab_idx = -1
+                player._gm_tab_idx = -1
+                rn = True
 
             flash_pending_damage()
+            # Show any full-screen popup queued by world events (e.g. old-man tips)
+            _ppop = getattr(player, "_pending_popup", None)
+            if _ppop:
+                player._pending_popup = None
+                try:
+                    term.print_page(_ppop)
+                except Exception:
+                    pass
             if rn: refresh()
             else:
                 # Refresh much more often when an animal is on-screen so its

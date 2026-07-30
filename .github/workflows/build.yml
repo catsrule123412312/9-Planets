@@ -6,77 +6,59 @@ on:
   workflow_dispatch:
 
 jobs:
-  # 1. Build Windows
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: pip install pyinstaller pygame
-      - name: Build with PyInstaller
-        run: pyinstaller --onefile --name "9Planets-Windows" 9_planets.py
-      - name: Upload Windows Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: win-build
-          path: dist/9Planets-Windows.exe
-
-  # 2. Build Mac
   build-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install pyinstaller pygame
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --name "9Planets-Mac" 9_planets.py
-      - name: Upload macOS Artifact
+        # Note the colon (:) for Mac/Linux
+        run: pyinstaller --onefile --name "9Planets" --add-data "assets:assets" 9_planets.py
+      - name: Upload macOS Build
         uses: actions/upload-artifact@v4
         with:
-          name: mac-build
-          path: dist/9Planets-Mac
+          name: 9Planets-macOS
+          path: dist/9Planets
 
-  # 3. Build Linux
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install pyinstaller pygame
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --name "9Planets-Linux" 9_planets.py
-      - name: Upload Linux Artifact
+        # Note the colon (:) for Mac/Linux
+        run: pyinstaller --onefile --name "9Planets" --add-data "assets:assets" 9_planets.py
+      - name: Upload Linux Build
         uses: actions/upload-artifact@v4
         with:
-          name: linux-build
-          path: dist/9Planets-Linux
+          name: 9Planets-Linux
+          path: dist/9Planets
 
-  # 4. The Final Step: Gather everything and publish safely
-  publish-release:
-    needs: [build-windows, build-macos, build-linux]
-    runs-on: ubuntu-latest
+  build-windows:
+    runs-on: windows-latest
     steps:
-      - name: Download all built files
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: final-builds
-          merge-multiple: true
-          
-      - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install pyinstaller pygame
+      - name: Build with PyInstaller
+        # Note the semicolon (;) for Windows
+        run: pyinstaller --onefile --name "9Planets" --add-data "assets;assets" 9_planets.py
+      - name: Upload Windows Build
+        uses: actions/upload-artifact@v4
         with:
-          files: final-builds/*
-          name: "9 Planets - Latest Build"
-          tag_name: "build-${{ github.run_id }}"
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: 9Planets-Windows
+          path: dist/9Planets.exe

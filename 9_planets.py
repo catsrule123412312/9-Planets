@@ -4758,23 +4758,62 @@ class SoundManager:
             if channel is None:
                 channel = pygame.mixer.find_channel(True)
             channel.play(sound, loops=loops)
+            if getattr(self, "_ducked", False):
+                try: channel.set_volume(getattr(self, "_duck_level", 0.12))
+                except Exception: pass
         except Exception:
             pass
 
+    def _all_channels(self):
+        chans = [getattr(self, n, None) for n in (
+            "bgm_channel", "ambient_channel", "craft_channel", "inspect_channel",
+            "gather_channel", "combat_bgm_channel")]
+        try:
+            for i in range(pygame.mixer.get_num_channels()):
+                chans.append(pygame.mixer.Channel(i))
+        except Exception:
+            pass
+        return [c for c in chans if c]
+
     def duck_volume(self, level=0.12):
-        """Lower all sound volumes (called when paused)."""
+        """Lower ALL sound + channel volumes (called when paused)."""
         if not self.enabled: return
+        self._ducked = True
+        self._duck_level = level
         try:
             for s in self.sounds.values():
                 if s: s.set_volume(level)
         except Exception: pass
+        for ch in self._all_channels():
+            try: ch.set_volume(level)
+            except Exception: pass
+        try: pygame.mixer.music.set_volume(level)
+        except Exception: pass
 
     def restore_volume(self):
-        """Restore full sound volumes (called when unpaused)."""
+        """Restore full sound + channel volumes (called when unpaused)."""
         if not self.enabled: return
+        self._ducked = False
         try:
             for s in self.sounds.values():
                 if s: s.set_volume(1.0)
+        except Exception: pass
+        for ch in self._all_channels():
+            try: ch.set_volume(1.0)
+            except Exception: pass
+        try: pygame.mixer.music.set_volume(1.0)
+        except Exception: pass
+
+    def stop_music(self):
+        """Hard-stop every looping/music channel (death, quitting)."""
+        try: pygame.mixer.music.stop()
+        except Exception: pass
+        for ch in self._all_channels():
+            try: ch.stop()
+            except Exception: pass
+        try:
+            self.in_combat_bgm = False
+            self.last_biome = None
         except Exception: pass
 
     def play_intro(self):
@@ -4889,6 +4928,17 @@ class SoundManager:
         snd = getattr(self, "god_voice", None)
         if snd is None:
             return
+        try:
+            snd.set_volume(1.0)
+        except Exception:
+            pass
+        # Try a plain Sound.play() first (allocates its own channel); fall back
+        # to force-stealing a channel if every channel is busy.
+        try:
+            if snd.play() is not None:
+                return
+        except Exception:
+            pass
         try:
             ch = pygame.mixer.find_channel(True)
             if ch:
@@ -7987,76 +8037,184 @@ class Terminal:
             coins = 0; points = 0
         essential.append(vfit(f"  🌡 {temp_str}  💰 {coins}  🏆 {points}", right_w))
 
-        # ---- Below here is OPTIONAL: dropped from the end if space is tight ----
+        # ---- FULL HUD: every field shown in normal mode, packed to fit ----
+        def _pack(tokens, width, indent="  ", sep=" | "):
+            """Greedy-pack short tokens into as few rows as possible."""
+            rows, cur = [], ""
+            for t in tokens:
+                t = str(t)
+                cand = (cur + sep + t) if cur else (indent + t)
+                if vlen(cand) <= width:
+                    cur = cand
+                else:
+                    if cur: rows.append(cur)
+                    if vlen(indent + t) <= width:
+                        cur = indent + t
+                    else:
+                        wl = vwrap(t, max(1, width - vlen(indent)))
+                        for w in wl[:-1]:
+                            rows.append(indent + w)
+                        cur = indent + wl[-1] if wl else ""
+            if cur: rows.append(cur)
+            return [vfit(r, width) for r in rows]
 
-        # Player state + equipped armor
-        state_icons = {"🧍": "Idle", "🚶": "Moving", "🗡️": "Armed", "🛡️": "Shielded"}
-        _state_lbl  = state_icons.get(_PLAYER_EMOJI, "")
-        _armor      = getattr(player, "wearing", None) or ""
-        _armor_disp = {"light_armor": "🛡️Lite", "medium_armor": "🛡️Med",
-                       "heavy_armor": "🛡️Hvy"}.get(_armor, "")
-        _armor_dur  = getattr(player, "armor_dur", 0)
-        if _armor_disp and _armor_dur > 0:
-            _armor_disp += f"({int(_armor_dur)})"
-        _state_str = f"  {_PLAYER_EMOJI} {_state_lbl}"
-        if _armor_disp:
-            _state_str += f"  {_armor_disp}"
-        optional.append(vfit(_state_str, right_w))
-
-        # Equipped spear
+        toks = []
+        # Position
+        toks.append(f"📍@({px},{py})")
+        # Weather (same normalization as normal mode)
         try:
-            _spear_t = getattr(player, "spear_type", None)
-            if _spear_t:
-                _sdur = getattr(player, "spear_dur", 0)
-                _smax = SPEAR_DEFS.get(_spear_t, {}).get("dur", 100)
-                _spct = int(100 * max(0, _sdur) / max(1, _smax))
-                _sico = SPEAR_DEFS.get(_spear_t, {}).get("icon", "🗡️")
-                _spois = " ☠️" if getattr(player, "spear_poison_strikes", 0) > 0 else ""
-                _sname = _spear_t.replace("_", " ").title()
-                optional.append(vfit(f"  {_sico} {_sname} {_spct}%{_spois}", right_w))
+            _wx = getattr(_g_weather, "current", "") or ""
+            if not in_forest:
+                _wxs = _wx.upper()
+            else:
+                _wxs = ("☀️ CLEAR" if any(w in _wx.upper() for w in
+                        ("ARCTIC", "BLIZZARD", "SNOW STORM", "SNOWSTORM")) else _wx.upper())
+            if _wxs: toks.append(_wxs)
         except Exception:
             pass
+        # Textbooks
+        try: toks.append(f"📚{int(player.inventory.get('textbook', 0))}")
+        except Exception: pass
+        # Tool durabilities
+        try:
+            if player.inventory.get("advanced_axe", 0) > 0 and player.axe_dur > 0:
+                toks.append(f"🪓{int(max(0,player.axe_dur)/TOOL_DUR_ADV*100)}%")
+            elif player.inventory.get("axe", 0) > 0 and player.axe_dur > 0:
+                toks.append(f"🪓{int(max(0,player.axe_dur)/TOOL_DUR*100)}%")
+            if player.inventory.get("pickaxe", 0) > 0 and player.pickaxe_dur > 0:
+                toks.append(f"⛏️{int(max(0,player.pickaxe_dur)/TOOL_DUR*100)}%")
+        except Exception:
+            pass
+        # Insulation + clothing
+        try:
+            _ins = (CLOTHING_INSULATION.get(player.wearing_pants, 0) +
+                    CLOTHING_INSULATION.get(player.wearing_shirt, 0))
+            if not in_forest:
+                toks.append(f"🧊{_ins:.0f}/{player.arctic_insulation_req:.0f}")
+            if player.wearing_pants:
+                toks.append(f"👖{CLOTHING_INSULATION[player.wearing_pants]}")
+            if player.wearing_shirt:
+                toks.append(f"👕{CLOTHING_INSULATION[player.wearing_shirt]}")
+        except Exception:
+            pass
+        # Armor
+        try:
+            if player.wearing or any(player.inventory.get(a_, 0) > 0
+                                     for a_ in ("light_armor", "medium_armor", "heavy_armor")):
+                _aw = (player.wearing or "None").replace("_", " ").title()
+                _ad = getattr(player, "armor_dur", 0)
+                toks.append(f"🛡️{_aw}" + (f"({int(_ad)})" if player.wearing and _ad > 0 else ""))
+        except Exception:
+            pass
+        # Spear + shield
+        try:
+            if player.spear_type and player.spear_dur > 0:
+                _sd = SPEAR_DEFS.get(player.spear_type, {})
+                _pz = "☠️" if getattr(player, "spear_poison_strikes", 0) > 0 else ""
+                toks.append(f"{_sd.get('icon','🗡️')}{int(max(0,player.spear_dur)/_sd.get('dur',100)*100)}%{_pz}")
+            if player.shield_type and player.shield_dur_blocks > 0:
+                toks.append(f"🛡️{player.shield_dur_blocks}blk/{player.shield_dur_absorb}abs")
+        except Exception:
+            pass
+        # Player state
+        try:
+            _state_lbl = {"🧍": "Idle", "🚶": "Moving", "🗡️": "Armed",
+                          "🛡️": "Shielded"}.get(_PLAYER_EMOJI, "")
+            if _state_lbl: toks.append(f"{_PLAYER_EMOJI}{_state_lbl}")
+        except Exception:
+            pass
+        # Cat / on fire
+        try:
+            if getattr(player, "cat_following", False):
+                _fcat = next((a_ for a_ in (getattr(world, "animals", []) or [])
+                              if a_.get("type") == "cat" and a_.get("_following_player")), None)
+                _fl = _fcat.get("loyalty", 0) if _fcat else 0
+                toks.append(f"🐈{_fl:+d}" + (" (dist)" if _fl <= -10 else ""))
+            if getattr(player, "on_fire", False):
+                toks.append("🔥 ON FIRE!")
+        except Exception:
+            pass
+        essential.extend(_pack(toks, right_w))
 
-        # Diseases
+        # Diseases (own row(s) — can be long)
         try:
             _dz = getattr(player, "diseases", {}) or {}
             if _dz:
-                optional.append(vfit("  ☣️  " + ", ".join(DISEASE_DISPLAY.get(d, d) for d in _dz), right_w))
+                _dl = ", ".join(DISEASE_DISPLAY.get(d, d) +
+                                (f" x{v.get('stacks',1)}" if v.get("stacks", 1) > 1 else "")
+                                for d, v in _dz.items())
+                essential.extend(_pack([f"☣️ {_dl}"], right_w))
         except Exception:
             pass
 
-        # Active crafting task
+        # Stations + HP — always shown, packed
         try:
-            if player.active_tasks:
-                t   = player.active_tasks[0]
-                rem = (t.get("paused_remaining", max(0, int(t.get("end", 0) - time.time())))
-                       if paused else max(0, int(t.get("end", 0) - time.time())))
-                optional.append(vfit(f"  🔨 {t['item'].replace('_',' ').title()} ({rem}s)", right_w))
+            _st_toks = []
+            for st, hp_ in (player.station_hp or {}).items():
+                if player.inventory.get(st, 0) > 0 and hp_ > 0:
+                    if "woodworking" in st:      _i, _n = "⚒️", "Woodwork"
+                    elif "sewing" in st:         _i, _n = "🪡", "Sewing"
+                    elif "furnace" in st:        _i, _n = "🔥", "Furnace"
+                    elif "smelter" in st:        _i, _n = "⚗️", "Smelter"
+                    elif "water_filter" in st:   _i, _n = "💧", "Filter"
+                    elif "liquifier" in st:      _i, _n = "🧪", "Liquifier"
+                    else:                        _i, _n = "🏭", st.replace("_", " ").title()[:8]
+                    _st_toks.append(f"{_i}{_n}:{int(hp_)}")
+            if _st_toks:
+                essential.extend(_pack(["🏭"] + _st_toks, right_w))
         except Exception:
             pass
 
-        # Resting state
+        # Activity rows: crafting, gather-all, resting, traps, paused
+        try:
+            for t in (player.active_tasks or [])[:2]:
+                if "paused_remaining" in t:
+                    rem = t["paused_remaining"]; tag = "⏸ PAUSED"
+                elif paused:
+                    rem = t.get("paused_remaining", max(0, int(t.get("end", 0) - time.time()))); tag = "⏸ PAUSED"
+                else:
+                    rem = max(0, int(t.get("end", 0) - time.time())); tag = "locked"
+                essential.extend(_pack([f"🔨 {t['item'].replace('_',' ').title()} ({rem}s) — {tag}"], right_w))
+        except Exception:
+            pass
+        try:
+            ga = getattr(player, "gather_all", None)
+            if ga:
+                if player.in_combat or getattr(player, "resting", False):
+                    _gr = ga.get("paused_remaining", max(0, int(ga["end"] - time.time())))
+                    essential.extend(_pack([f"⏳ Gather all paused ({_gr}s)"], right_w))
+                else:
+                    _gr = max(0, int(ga["end"] - time.time()))
+                    essential.extend(_pack([f"⏳ Gather all: {_gr}s — locked"], right_w))
+        except Exception:
+            pass
         try:
             if getattr(player, "resting", False):
-                _rest_icon = {"campfire": "🔥", "house_bed": "🛏️",
-                              "house_floor": "🏠"}.get(getattr(player, "rest_mode", ""), "😴")
-                optional.append(vfit(f"  {_rest_icon} Resting…", right_w))
+                _rm = getattr(player, "rest_mode", "")
+                if _rm == "campfire":
+                    _rs = f"🔥 Campfire rest +30😴/hr | 🪵{player.campfire_fuel} fuel"
+                elif _rm == "house_bed":
+                    _rs = "🛏️ Bed rest +30😴/hr ×1.3"
+                elif _rm == "house_floor":
+                    _rs = "🏠 House floor rest +30😴/hr"
+                else:
+                    _rs = "😴 Floor rest +30😴/hr"
+                essential.extend(_pack([_rs], right_w))
         except Exception:
             pass
-
-        # Paused flag + trap status
-        if paused:
-            optional.append(vfit("  ⏸️  PAUSED", right_w))
         try:
-            setting_t = sum(1 for tr in (player.traps or []) if tr.get("status") == "setting")
-            caught_t  = sum(1 for tr in (player.traps or []) if tr.get("status") == "caught")
-            if caught_t or setting_t:
+            _set_t = sum(1 for tr in (player.traps or []) if tr.get("status") == "setting")
+            _cau_t = sum(1 for tr in (player.traps or []) if tr.get("status") == "caught")
+            if _set_t or _cau_t:
                 _tp = []
-                if caught_t:  _tp.append(f"🟢{caught_t} ready")
-                if setting_t: _tp.append(f"⏳{setting_t} setting")
-                optional.append(vfit("  🪤 " + "  ".join(_tp), right_w))
+                if _cau_t: _tp.append(f"🟢{_cau_t} ready")
+                if _set_t: _tp.append(f"⏳{_set_t} setting")
+                essential.extend(_pack(["🪤 " + "  ".join(_tp)], right_w))
         except Exception:
             pass
+        if paused:
+            essential.append(vfit("  ⏸️  PAUSED — time & weather frozen", right_w))
+
 
         # Messages — word-wrapped so nothing is truncated
         _msg_rows = []
@@ -8080,6 +8238,15 @@ class Terminal:
         _max_top = max(len(essential), term_h - _bottom_reserve)
         _room_for_optional = max(0, _max_top - len(essential))
         top = essential + optional[:_room_for_optional]
+        # Make space: if the full HUD still doesn't fit, drop trailing blank
+        # rows first, then keep the newest rows (bottom prompt is separate).
+        _hard_cap = max(1, term_h - _bottom_reserve)
+        while len(top) > _hard_cap and any(r.strip() == "" for r in top):
+            for _i in range(len(top) - 1, -1, -1):
+                if top[_i].strip() == "":
+                    top.pop(_i); break
+        if len(top) > _hard_cap:
+            top = top[:_hard_cap]
 
 
         # ── BOTTOM SECTION ────────────────────────────────────────────────
@@ -14178,6 +14345,7 @@ def _check_shield_break(player, msg):
 
 
 _g_world = None  # module-level world reference set by main game loop
+_g_weather = None  # module-level weather reference set by main game loop
 
 def _enemy_attack_player(player, enemy, msg):
     # If player is inside a house, redirect monster attack to the house instead
@@ -15319,32 +15487,62 @@ def _dr_nice(name):
     return str(name).replace("_", " ").title()
 
 def _dr_render(term, pr, pc, text_lines, white_rows=0, prompt=""):
-    """Repaint the death room in place (no clear-screen => no flicker)."""
-    out = []
-    for r in range(DR_H):
-        if r < white_rows:
-            out.append(_cell2(DR_WHITE) * DR_W)
-            continue
-        row = []
-        for c in range(DR_W):
-            if c == pc and r in (pr, pr + 1):
-                row.append(_cell2(DR_PLAYER))
-            elif (r, c) in DR_GOD_CELLS:
-                row.append(_cell2(DR_GOD_CELLS[(r, c)]))
-            else:
-                row.append(_cell2(DR_BLACK))
-        out.append("".join(row))
-    out.append("")
-    for line in text_lines:
-        out.extend(vwrap(str(line), TERM_WIDTH) if line else [""])
-    if prompt:
-        out.append(prompt)
+    """Repaint the death room in place (no clear-screen => no flicker).
+
+    The room is windowed to whatever the terminal can show, and the dialogue
+    text ALWAYS gets its rows first — so graphics mode (smaller window / bigger
+    font) looks the same as standard mode instead of cutting the text off."""
     try:
-        _cols, _ = os.get_terminal_size()
+        _cols, _rows = os.get_terminal_size()
     except Exception:
-        _cols = TERM_WIDTH
+        _cols, _rows = TERM_WIDTH, 24
     _cols = max(20, _cols)
+    _rows = max(8, _rows)
     _draw_w = max(1, _cols - 8)
+
+    # ── Text block first (it has priority over room rows) ────────────────
+    text = []
+    for line in text_lines:
+        text.extend(vwrap(str(line), _draw_w) if line else [""])
+    if prompt:
+        text.append(prompt)
+
+    avail = _rows - 1                     # keep one spare row: never scroll
+    text_h = min(len(text) + 1, max(3, avail - 6))   # +1 = blank spacer row
+    grid_h = max(4, min(DR_H, avail - text_h))
+    grid_w = max(6, min(DR_W, _draw_w // 2))
+
+    # Vertical window: keep the god (rows 12-16) and the player in view.
+    lo = min(12, pr); hi = max(16, pr + 1)
+    if hi - lo + 1 <= grid_h:
+        r0 = lo - (grid_h - (hi - lo + 1)) // 2
+    else:
+        r0 = pr - grid_h // 2
+    r0 = max(0, min(DR_H - grid_h, r0))
+    # Horizontal window: keep the god column (12) and the player column.
+    clo = min(9, pc); chi = max(15, pc)
+    if chi - clo + 1 <= grid_w:
+        c0 = clo - (grid_w - (chi - clo + 1)) // 2
+    else:
+        c0 = pc - grid_w // 2
+    c0 = max(0, min(DR_W - grid_w, c0))
+
+    def _tile(r, c):
+        if r < white_rows:
+            return _cell2(DR_WHITE)
+        if c == pc and r in (pr, pr + 1):
+            return _cell2(DR_PLAYER)
+        if (r, c) in DR_GOD_CELLS:
+            return _cell2(DR_GOD_CELLS[(r, c)])
+        return _cell2(DR_BLACK)
+
+    out = []
+    for r in range(r0, r0 + grid_h):
+        out.append("".join(_tile(r, c) for c in range(c0, c0 + grid_w)))
+    out.append("")
+    out.extend(text[-(max(1, text_h - 1)):] if len(text) > text_h - 1 else text)
+    out = out[:avail]
+
     body = "\033[K\r\n".join(vtrunc(str(l), _draw_w).rstrip() for l in out)
     sys.stdout.write("\033[?25l\033[H\033[40m\033[97m" + body + "\033[K\033[J")
 
@@ -15353,22 +15551,14 @@ def _dr_render(term, pr, pc, text_lines, white_rows=0, prompt=""):
     # column or two across a row. Re-stamp every grid cell at an explicit
     # \033[row;colH so each tile is pinned to its exact column.
     _fx = []
-    for r in range(DR_H):
-        _row = r + 1
-        for c in range(DR_W):
-            _col = 1 + c * 2
-            if r < white_rows:
-                _ic = _cell2(DR_WHITE)
-            elif c == pc and r in (pr, pr + 1):
-                _ic = _cell2(DR_PLAYER)
-            elif (r, c) in DR_GOD_CELLS:
-                _ic = _cell2(DR_GOD_CELLS[(r, c)])
-            else:
-                _ic = _cell2(DR_BLACK)
-            _fx.append(f"\033[{_row};{_col}H{_ic}")
+    for i in range(grid_h):
+        _row = i + 1
+        for j in range(grid_w):
+            _fx.append(f"\033[{_row};{1 + j * 2}H{_tile(r0 + i, c0 + j)}")
     sys.stdout.write("".join(_fx))
-    sys.stdout.write(f"\033[{DR_H + 1};1H")
+    sys.stdout.write(f"\033[{min(len(out) + 1, _rows)};1H")
     sys.stdout.flush()
+
 
 def _dr_move(pr, pc, key):
     nr, nc = pr, pc
@@ -15473,6 +15663,8 @@ def _dr_silence_music(sound):
         return
     try: sound.stop_all_loops()
     except Exception: pass
+    try: sound.stop_music()
+    except Exception: pass
     for name in ("bgm_channel", "ambient_channel", "combat_bgm_channel"):
         ch = getattr(sound, name, None)
         if ch:
@@ -15490,6 +15682,13 @@ def _dr_restore_music(sound):
     if ch:
         try: ch.set_volume(1.0)
         except Exception: pass
+    prev_biome = getattr(sound, "last_biome", None)
+    try:
+        sound.last_biome = None
+        if prev_biome:
+            sound.play_environment(prev_biome)
+    except Exception:
+        pass
     for meth in ("restore_ambient", "start_ambient", "play_ambient", "resume_bgm", "start_bgm"):
         fn = getattr(sound, meth, None)
         if callable(fn):
@@ -15500,12 +15699,42 @@ def _dr_restore_music(sound):
                 pass
 
 
+def _dr_exit_graphics(player, was_on):
+    """Restore graphics mode (and its zoom) after the death room."""
+    if not was_on:
+        return
+    try:
+        player.graphics_mode = True
+    except Exception:
+        pass
+    try:
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def death_room_sequence(term, player, world, sound, death_reason):
     """Full death → god → revive flow. Returns True if the player is revived."""
     deaths = int(getattr(player, "death_count", 0)) + 1
     player.death_count = deaths
 
     state = {"pr": 22, "pc": 12}
+    # The death room is drawn with its own standard-mode renderer. Graphics
+    # mode keeps a different theme/zoom and repaints the split-panel HUD, which
+    # made the room look wrong there. Leave graphics mode for the duration and
+    # restore it afterwards so both modes look identical.
+    _gm_was = bool(getattr(player, "graphics_mode", False))
+    if _gm_was:
+        try:
+            player.graphics_mode = False
+        except Exception:
+            pass
+    try:
+        sys.stdout.write("\033[?25l\033[0m\033[40m\033[97m\033[H\033[2J")
+        sys.stdout.flush()
+    except Exception:
+        pass
     _dr_silence_music(sound)
     if sound and getattr(sound, "enabled", False):
         try: sound.play_god_voice()
@@ -15527,6 +15756,7 @@ def death_room_sequence(term, player, world, sound, death_reason):
             "\"You carry nothing at all. Even I cannot trade with empty hands.\"",
             "", "Press any key..."], accept="abcdefghijklmnopqrstuvwxyz \r\n", seconds=6.0)
         _dr_restore_music(sound)
+        _dr_exit_graphics(player, _gm_was)
         return False
 
     ask = header + [
@@ -15570,6 +15800,7 @@ def death_room_sequence(term, player, world, sound, death_reason):
     except Exception:
         pass
     _dr_restore_music(sound)
+    _dr_exit_graphics(player, _gm_was)
     return True
 
 
@@ -15668,6 +15899,7 @@ def main():
             sound.play_environment(world.biome)
         _stop_menu_music()
         weather = WeatherSystem()
+        global _g_weather; _g_weather = weather
         term.theme_mode = player.terminal_theme
         term.pause_context_player = player
         # Adaptive mode: just verify terminal is large enough for any map.
@@ -16362,6 +16594,8 @@ def main():
                 else:
                     death_reason = player.last_damage_cause or "Fatal injuries"
                 if sound and sound.enabled:
+                    try: sound.stop_music()
+                    except Exception: pass
                     sound.play_death()
                 flash_pending_damage()
                 term.render_main(["💀 GAME OVER"],[f"📍@({player.x},{player.y})"],

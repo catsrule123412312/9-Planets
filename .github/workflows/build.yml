@@ -15,7 +15,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pyinstaller pygame
-      # Notice we named it 9Planets-Windows so it doesn't clash
       - run: pyinstaller --onefile --name "9Planets-Windows" --add-data "assets;assets" 9_planets.py
       - uses: actions/upload-artifact@v4
         with:
@@ -31,7 +30,6 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pyinstaller pygame
-      # Notice we named it 9Planets-Mac (No .exe for Mac!)
       - run: pyinstaller --onefile --name "9Planets-Mac" --add-data "assets:assets" 9_planets.py
       - uses: actions/upload-artifact@v4
         with:
@@ -47,14 +45,13 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pyinstaller pygame
-      # Notice we named it 9Planets-Linux (No .exe for Linux!)
       - run: pyinstaller --onefile --name "9Planets-Linux" --add-data "assets:assets" 9_planets.py
       - uses: actions/upload-artifact@v4
         with:
           name: linux-build
           path: dist/9Planets-Linux
 
-  # 4. The Final Step: Gather everything and publish to the Release page safely
+  # 4. The Final Step: Gather everything and publish safely
   publish-release:
     needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
@@ -68,10 +65,10 @@ jobs:
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          # This grabs the .exe, the Mac file, and the Linux file all at once!
           files: final-builds/*
-          name: "Latest Build"
-          tag_name: "latest"
-          prerelease: false
+          name: "9 Planets - Latest Build"
+          # This creates a unique tag every time so it never fails!
+          tag_name: "build-${{ github.run_id }}"
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

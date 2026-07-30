@@ -3,7 +3,7 @@ name: Build 9 Planets
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:  # Lets you trigger manually
 
 jobs:
   build-macos:
@@ -15,10 +15,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install pyinstaller pygame
+        run: |
+          pip install pyinstaller pygame
       - name: Build with PyInstaller
-        # Note the colon (:) for Mac/Linux
-        run: pyinstaller --onefile --name "9Planets" --add-data "assets:assets" 9_planets.py
+        run: |
+          pyinstaller --onefile --name "9Planets" 9_planets.py
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
         with:
@@ -34,10 +35,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install pyinstaller pygame
+        run: |
+          pip install pyinstaller pygame
       - name: Build with PyInstaller
-        # Note the colon (:) for Mac/Linux
-        run: pyinstaller --onefile --name "9Planets" --add-data "assets:assets" 9_planets.py
+        run: |
+          pyinstaller --onefile --name "9Planets" 9_planets.py
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4
         with:
@@ -53,10 +55,11 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install dependencies
-        run: pip install pyinstaller pygame
+        run: |
+          pip install pyinstaller pygame
       - name: Build with PyInstaller
-        # Note the semicolon (;) for Windows
-        run: pyinstaller --onefile --name "9Planets" --add-data "assets;assets" 9_planets.py
+        run: |
+          pyinstaller --onefile --name "9Planets" 9_planets.py
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:

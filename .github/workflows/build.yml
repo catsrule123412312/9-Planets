@@ -15,13 +15,12 @@ jobs:
           python-version: '3.12'
       - run: pip install pyinstaller pygame
       
-      # THE MAGIC TRICK: Creates a tiny script to fix the asset paths automatically
       - name: Create runtime hook
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build with PyInstaller
-        # --onefile makes it a single file. --runtime-hook fixes the assets. --icon adds your logo.
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "assets;assets" --icon="logo.ico" 9_planets.py
+        # Changed to look for "9 Planets Beta" instead of "assets"
+        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta;9 Planets Beta" --icon="logo.ico" 9_planets.py
         
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
@@ -42,7 +41,8 @@ jobs:
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build with PyInstaller
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "assets:assets" --icon="logo.icns" 9_planets.py
+        # Changed to look for "9 Planets Beta" instead of "assets"
+        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" --icon="logo.icns" 9_planets.py
         
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
@@ -63,8 +63,8 @@ jobs:
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build with PyInstaller
-        # Linux doesn't support embedded icons, so we leave --icon out
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "assets:assets" 9_planets.py
+        # Changed to look for "9 Planets Beta" instead of "assets"
+        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" 9_planets.py
         
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4

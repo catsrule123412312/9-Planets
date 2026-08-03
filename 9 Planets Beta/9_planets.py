@@ -7711,7 +7711,7 @@ class World:
 
     def update_fire(self, weather, player):
         now = time.time()
-        if now - self.last_fire_tick < 2.0:
+        if now - self.last_fire_tick < 0.5:
             return
         self.last_fire_tick = now
         if not weather.firestorm_active:
@@ -7742,16 +7742,20 @@ class World:
                 "meta": {"regrows": False, "hazard_key": None, "is_ash": True}
             }
 
+        # Fire spreads at a steady rate of exactly one new cluster per tick
+        # (one every 500 ms).
         new_ignites = []
         to_ash = []
-        for pos in burning:
+        spread_order = list(burning)
+        random.shuffle(spread_order)
+        for pos in spread_order:
             if extinguished_by_water(pos):
                 to_ash.append(pos)
                 continue
-            if random.random() < 0.20:
+            if random.random() < 0.05:
                 to_ash.append(pos)
                 continue
-            if random.random() >= 0.60:
+            if new_ignites:
                 continue
 
             candidates = []
@@ -12062,6 +12066,39 @@ def resolve_any_berry(player, recipe):
     return True, None
 
 # ==================== SAVE HELPERS ====================
+def _json_safe(obj, _depth=0):
+    """Recursively convert any game state into something json.dump can handle.
+
+    Runtime state can pick up sets, tuples, tuple-keyed dicts, threads, pygame
+    handles, etc. Any one of those used to make the whole save raise and the
+    game reported "Save failed". Anything that cannot be represented is either
+    converted (set/tuple -> list, non-str keys -> str) or dropped.
+    """
+    if _depth > 12:
+        return None
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else 0.0
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if not isinstance(k, str):
+                if isinstance(k, (tuple, list)):
+                    k = "_".join(str(p) for p in k)
+                else:
+                    k = str(k)
+            try:
+                out[k] = _json_safe(v, _depth + 1)
+            except Exception:
+                continue
+        return out
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [_json_safe(v, _depth + 1) for v in obj]
+    # Unsupported object (thread, lock, pygame Sound, custom class...): drop it.
+    return None
+
+
 def do_save(player, world, save_path, biome, dead=False, death_reason="", paused=False):
     """Serialize player + world state to save_path."""
     # Accumulate session playtime before saving, but do not count paused time.
@@ -12095,17 +12132,27 @@ def do_save(player, world, save_path, biome, dead=False, death_reason="", paused
             "dead": dead,
             "death_reason": death_reason,
         },
-        "player": {k: v for k, v in player.__dict__.items() if k not in ["inventory", "session_start", "sound"]},
-        "player_inv": save_inv,
+        "player": _json_safe({k: v for k, v in player.__dict__.items()
+                              if k not in ["inventory", "session_start", "sound"]}),
+        "player_inv": _json_safe(save_inv),
         "world": {
-            "clusters": {f"{x}_{y}": v for (x, y), v in world.all_clusters_for_save().items()},
-            "animals": world.all_animals_for_save(),
-            "houses": world.houses,
+            "clusters": _json_safe({f"{x}_{y}": v for (x, y), v in world.all_clusters_for_save().items()}),
+            "animals": _json_safe(world.all_animals_for_save()),
+            "houses": _json_safe(world.houses),
         },
     }
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    with open(save_path, "w") as f:
+    data = _json_safe(data)
+    d = os.path.dirname(save_path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    # Write to a temp file first, then replace: a crash mid-write can never
+    # leave a truncated (unloadable) save behind.
+    tmp_path = save_path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, save_path)
 
 
 def delete_save(save_name):
@@ -13318,7 +13365,9 @@ def main():
                     if isinstance(v, dict) and v.get("__unknown__"):
                         player.inventory[k] = {"qty": v.get("qty", 0), "items": v.get("items", []),
                                                "inspect_tries": v.get("inspect_tries", 0)}
-                    elif k in player.inventory and isinstance(v, (int, float)):
+                    elif isinstance(v, (int, float)):
+                        # Restore every item, not just the ones present in a
+                        # fresh inventory (that used to silently delete loot).
                         player.inventory[k] = v
                 world.animals = data.get("world", {}).get("animals", [])
                 world.houses = data.get("world", {}).get("houses", [])

@@ -11,7 +11,7 @@ CHANGES v17: quest display active-only, plank quest checks inventory, first-nigh
          station display show all, tools durability in inventory.
 """
 
-import time, random, math, json, os, sys, select, signal, unicodedata, threading, io
+import time, random, math, json, os, sys, select, signal, unicodedata, threading, io, re
 try:
     import tty, termios
     HAVE_TERMIOS = True
@@ -36,6 +36,152 @@ except BaseException:
     pygame = None
     array = None
     PYGAME_AVAILABLE = False
+
+
+# ==================== ASSET FILE RESOLUTION (fuzzy) ====================
+# Audio lives in an "assets/" folder next to this script. Filenames get renamed
+# by users all the time (inventory_music.ogg vs music_inventory.ogg, adrift.ogg
+# vs hayden-folker-adrift-_1_.ogg ...), so resolution is tolerant: exact name
+# first, then normalized name, then same-words-any-order, then keyword match.
+import pathlib as _pathlib
+
+_ASSET_ALIASES = {
+    "hayden-folker-adrift-_1_.ogg": ["adrift", "hayden", "hayden_folker", "music_ambient",
+                                     "ambient_music", "ambience", "ambient", "music_ambience"],
+    "arctic_ambience.ogg": ["arctic_ambience", "ambience_arctic", "arctic"],
+    "music_combat_bgm.ogg": ["music_combat_bgm", "combat_bgm", "battle_music", "music_battle",
+                             "combat", "battle", "dragon_castle", "dragoncastle"],
+    "audiomass-output_1785068794813.ogg": ["god", "god_voice", "hildegard", "audiomass-output_1785068794813"],
+}
+
+
+_ASSET_AUDIO_EXTS = (".ogg", ".wav", ".mp3", ".flac")
+
+
+def _assets_dir():
+    base = _pathlib.Path(__file__).resolve().parent
+    candidates = [base / "assets", base / "9 Planets Beta" / "assets"]
+    for cand in candidates:
+        if cand.is_dir():
+            return cand
+    return base / "assets"
+
+
+def _norm_asset_name(name):
+    stem = name.rsplit(".", 1)[0].lower()
+    return "".join(ch for ch in stem if ch.isalnum())
+
+
+def _tok_asset_name(name):
+    stem = name.rsplit(".", 1)[0].lower()
+    toks = [t for t in re.split(r"[^a-z0-9]+", stem) if t and t not in ("1", "ogg", "wav", "mp3")]
+    return tuple(sorted(toks))
+
+
+# Files that must never be picked up by fuzzy matching for the menu/inventory
+# tracks (they belong to other systems and caused "menu plays normal music").
+_ASSET_RESERVED = {
+    "hayden-folker-adrift-_1_.ogg", "arctic_ambience.ogg", "music_combat_bgm.ogg",
+    "audiomass-output_1785068794813.ogg", "music_death.ogg", "music_cook_start.ogg",
+    "music_cook_body.ogg", "music_cook_end.ogg", "music_smelter.ogg", "music_sewing.ogg",
+}
+_ASSET_EXCLUSIVE = ("music_menu.ogg", "music_inventory.ogg")
+
+
+def _reserved_norms(for_filename):
+    """Normalized names/aliases that `for_filename` must not resolve to."""
+    out = set()
+    if for_filename not in _ASSET_EXCLUSIVE:
+        return out
+    others = set(_ASSET_RESERVED)
+    for other in _ASSET_EXCLUSIVE:
+        if other != for_filename:
+            others.add(other)
+    for name in others:
+        out.add(_norm_asset_name(name))
+        for alias in _ASSET_ALIASES.get(name, []):
+            out.add(_norm_asset_name(alias))
+    return out
+
+
+def resolve_asset_path(filename):
+    """Return a Path to the best matching file in assets/, or None."""
+    d = _assets_dir()
+    try:
+        if not d.is_dir():
+            return None
+        files = [p for p in d.iterdir() if p.is_file()]
+    except Exception:
+        return None
+    exact = d / filename
+    if exact.exists():
+        return exact
+    wanted = [filename] + list(_ASSET_ALIASES.get(filename, []))
+    wanted_norm = [_norm_asset_name(w) for w in wanted]
+    audio = [p for p in files if p.suffix.lower() in _ASSET_AUDIO_EXTS] or files
+    banned = _reserved_norms(filename)
+    if banned:
+        audio = [p for p in audio
+                 if not any(b and (b == _norm_asset_name(p.name) or b in _norm_asset_name(p.name))
+                            for b in banned)]
+    # 1) normalized filename match
+    for p in audio:
+        if _norm_asset_name(p.name) in wanted_norm:
+            return p
+    # 2) same words, any order (inventory_music == music_inventory)
+    wanted_tok = {_tok_asset_name(w) for w in wanted}
+    for p in audio:
+        if _tok_asset_name(p.name) in wanted_tok:
+            return p
+    # 3) keyword containment (skip very short/ambiguous keys)
+    for w in wanted_norm:
+        if len(w) < 5:
+            continue
+        for p in audio:
+            n = _norm_asset_name(p.name)
+            if w in n or n in w:
+                return p
+    return None
+
+
+def resolve_exact_asset(stem):
+    """Strict lookup: assets/<stem>.<ext> — NO fuzzy matching at all.
+    Only the literal file name (any supported audio extension) is accepted."""
+    d = _assets_dir()
+    try:
+        if not d.is_dir():
+            return None
+    except Exception:
+        return None
+    for ext in _ASSET_AUDIO_EXTS:
+        p = d / (stem + ext)
+        try:
+            if p.is_file():
+                return p
+        except Exception:
+            pass
+    return None
+
+
+# Exact file names (no fuzzy matching) for the two "screen" tracks.
+MENU_TRACK_NAME      = "audiomass-output-_1_"   # assets/audiomass-output-_1_.ogg
+INVENTORY_TRACK_NAME = "music_inventory"   # assets/music_inventory.ogg
+
+
+def resolve_menu_track():
+    """Menu track — strictly assets/menu_music.ogg."""
+    return resolve_exact_asset(MENU_TRACK_NAME)
+
+
+def resolve_inventory_track():
+    """Inventory track — try the preferred names and common aliases."""
+    for stem in (INVENTORY_TRACK_NAME, "inventory_music"):
+        path = resolve_exact_asset(stem)
+        if path:
+            return path
+    return resolve_asset_path("music_inventory.ogg") or resolve_asset_path("inventory_music.ogg")
+
+
 
 # ==================== VISUAL WIDTH HELPERS ====================
 # Emoji and CJK chars take 2 terminal columns; Python len() counts them as 1.
@@ -138,85 +284,363 @@ def _cell2(icon):
 def _world_tile(x, y):
     """Return the exact resource tile used by gather/inspect/build actions."""
     return int(x), int(y)
-
 # ==================== COMMANDS SIDEBAR ====================
 # A reference list shown on the right side of wide terminals so players
-# always see the basic command vocabulary (mirrors Help page 1).
+# always see the whole command vocabulary. Descriptions are NOT printed —
+# they live in the hover tooltip, which frees the space for many more
+# commands (including the ones players rarely discover on their own).
 SIDEBAR_COMMANDS = [
     # ── Movement ──────────────────────────────────────────────────────────
-    ("⬆️⬇️⬅️➡️",   "Move 1 tile (arrow keys)"),
-    ("walk <name>",  "Auto-walk to resource/animal"),
-    ("walk <x,y>",   "Walk to exact coordinates"),
+    ("⬆️⬇️⬅️➡️",   "Move 1 tile (arrow keys). Each step costs 0.5⚡ and drains hunger/thirst slightly."),
+    ("walk <name>",  "Auto-walk to a named resource, cluster or animal, e.g. 'walk to fresh water'."),
+    ("walk <x,y>",   "Auto-walk to exact world coordinates, e.g. 'walk 120,-40'."),
+    ("move <dir>",   "Step one tile in a direction: move north / south / east / west."),
     # ── Combat ────────────────────────────────────────────────────────────
-    ("attack / a",   "Strike nearest animal"),
-    ("throw / t",    "Throw spear at nearest"),
-    ("hunt <animal>","Hunt: rabbit/deer/seal…"),
-    ("hunt … grid",  "Open tactical grid combat"),
+    ("attack / a",   "Strike the nearest animal with your equipped weapon."),
+    ("throw / t",    "Throw your spear at the nearest animal. Costs spear durability."),
+    ("hunt <animal>","Track and hunt a species: rabbit, deer, seal, grot…"),
+    ("hunt … grid",  "Open tactical turn-based grid combat against the target."),
+    ("grid",         "Enter grid combat mode against whatever is engaging you."),
+    ("block",        "Grid combat: raise your shield and absorb the next hit."),
+    ("flee",         "Run from combat. Grots may chase — battle music keeps playing."),
+    ("poison <item>","Coat your weapon with a poisonous item before striking."),
     # ── Resources ─────────────────────────────────────────────────────────
-    ("gather",       "Collect at current tile (-2⚡)"),
-    ("gather all",   "Collect whole cluster"),
-    ("inspect <x>",  "Identify unknown cluster"),
-    ("identify <x>", "Alias for inspect"),
-    ("explain <x>",  "Explain item details"),
+    ("gather",       "Collect the resource on your current tile (-2⚡)."),
+    ("gather all",   "Keep gathering until the whole cluster is emptied."),
+    ("gather <n>",   "Gather an exact amount, e.g. 'gather 10'."),
+    ("pickup",       "Pick up a dropped item or a placed station from this tile."),
+    ("drop <item>",  "Drop an item from your inventory onto the ground."),
+    ("inspect <x>",  "Identify an unknown cluster (limited attempts)."),
+    ("identify <x>", "Alias for inspect."),
+    ("explain <x>",  "Explain an item, recipe or game mechanic in detail."),
     # ── Inventory & Crafting ──────────────────────────────────────────────
-    ("inv",          "View inventory"),
-    ("eat <item>",   "Eat food from inventory"),
-    ("drink <item>", "Drink water / liquid"),
-    ("craft <item>", "Start crafting an item"),
-    ("cancel",       "Cancel crafting task"),
-    ("pause craft",  "Pause / resume crafting"),
-    ("recipes",      "Browse all recipes"),
+    ("inv",          "Open your inventory. Hover any item for its full stats."),
+    ("eat <item>",   "Eat food. Supports 'eat all sweet berries' and 'eat 5 wild berries'."),
+    ("drink <item>", "Drink water or a liquid. Supports 'drink 5 fresh water'."),
+    ("craft <item>", "Start crafting. Supports amounts, e.g. 'craft 3 plank'."),
+    ("cancel",       "Cancel the crafting task in progress (materials are lost)."),
+    ("pause craft",  "Pause or resume the current crafting task."),
+    ("recipes",      "Browse every recipe. Hover a recipe for materials and time."),
+    ("filter",       "Run dirty water through a water filter station."),
     # ── Equipment ─────────────────────────────────────────────────────────
-    ("equip <item>", "Equip armor / weapon"),
-    ("wear <item>",  "Alias for equip"),
-    ("remove <item>","Unequip item"),
-    ("bandage",      "Apply bandage (heal)"),
-    ("apply <item>", "Apply a usable item"),
+    ("equip <item>", "Equip armour, a weapon or clothing."),
+    ("wear <item>",  "Alias for equip."),
+    ("remove <item>","Unequip an item you are wearing."),
+    ("unequip <x>",  "Alias for remove."),
+    ("bandage",      "Apply a bandage to stop bleeding and heal."),
+    ("apply <item>", "Apply a usable item such as medicine or herbal tea."),
     # ── Survival ──────────────────────────────────────────────────────────
-    ("rest",         "Toggle resting (restore stats)"),
-    ("unrest",       "Alias: stop resting"),
-    ("fire",         "Light / extinguish campfire"),
-    ("status",       "Show detailed status screen"),
-    ("filter",       "Use water filter on water"),
+    ("rest",         "Toggle resting. Restores fatigue and energy over time."),
+    ("unrest",       "Stop resting and stand back up."),
+    ("fire",         "Light or extinguish a campfire (needs fuel)."),
+    ("status",       "Detailed status screen: stats, diseases, temperature."),
+    ("game",         "Show world info: day, playtime, points, difficulty."),
+    # ── Housing ───────────────────────────────────────────────────────────
+    ("build <type>", "Build a house at your location; you enter it immediately."),
+    ("enter",        "Enter the house footprint you are standing on."),
+    ("house status", "Show the HP and contents of the house you are in."),
+    # ── Cats & Animals ────────────────────────────────────────────────────
+    ("pet",          "Pet a nearby cat. Loyalty rises if it has rolled over."),
+    ("feed <item>",  "Feed meat or catnip to a cat — it rolls over and lets you pet it."),
     # ── Traps ─────────────────────────────────────────────────────────────
-    ("trap set",     "Place a trap at current tile"),
-    ("trap check",   "Collect caught animals"),
-    ("trap remove",  "Pick up a trap"),
-    ("trap list",    "Show all active traps"),
-    ("traps",        "Alias for trap list"),
+    ("trap set",     "Place a trap on the current tile."),
+    ("trap check",   "Check traps and collect anything caught."),
+    ("trap remove",  "Pick a trap back up (uses one durability)."),
+    ("trap list",    "List every active trap and its status."),
+    ("traps",        "Alias for trap list."),
     # ── Economy & Quests ──────────────────────────────────────────────────
-    ("shop",         "Browse shop items & prices"),
-    ("buy <item>",   "Buy item from shop"),
-    ("sell <item>",  "Sell item to shop"),
-    ("quests",       "Active quest log"),
-    ("achievements", "Progress & rewards"),
+    ("shop",         "Browse shop stock and prices."),
+    ("buy <item>",   "Buy from the shop. Supports 'buy 5 dirt'."),
+    ("sell <item>",  "Sell to the shop. Supports 'sell all common mushrooms'."),
+    ("quests",       "Active quest log with objectives and rewards."),
+    ("achievements", "Achievement progress and rewards."),
     # ── Game Control ──────────────────────────────────────────────────────
-    ("pause",        "Pause / resume game"),
-    ("resume",       "Resume (unpause)"),
-    ("help",         "Open help menu (paginated)"),
-    ("tutorials",    "Re-read tutorials"),
-    ("save",         "Save progress to file"),
-    ("commands",     "Toggle this command panel"),
-    ("quit / exit",  "Exit game"),
+    ("pause",        "Freeze the world while you read or plan."),
+    ("resume",       "Unpause the game."),
+    ("help",         "Open the paginated help book."),
+    ("tutorials",    "Replay the tutorial pages."),
+    ("save",         "Save your progress to the save file."),
+    ("commands",     "Show or hide this command panel."),
+    ("quit / exit",  "Leave the game and return to the main menu."),
 ]
 
+# Human-readable explanation for every stat shown in the HUD status bar.
+# Used by the hover tooltip so players can learn what each number means.
+STAT_TOOLTIPS = [
+    ("❤️",  "Health — reach 0 and the run is over. Restored by bandages, medicine and Hildegard."),
+    ("🍽️", "Hunger — drains over time. At 0 you lose 10 HP immediately, then every 30 seconds."),
+    ("💧",  "Thirst — drains over time. At 0 you take continuous HP damage. Filter dirty water first."),
+    ("⚡",  "Energy — spent by every action (walking, gathering, crafting). It does NOT regenerate; eat to refill."),
+    ("😴",  "Fatigue — drains slowly. At 0 you cannot gather, craft or walk. Rest or drink coffee (+25)."),
+    ("🪓",  "Axe durability — percentage left before the axe breaks. Needed for wood."),
+    ("⛏️",  "Pickaxe durability — percentage left before it breaks. Needed for rock and ore."),
+    ("🗡️",  "Spear durability — drops each time you throw or stab."),
+    ("🛡️",  "Shield / armour — blocks remaining and damage absorbed per block."),
+    ("🧊",  "Insulation — your clothing warmth versus the Arctic requirement. Too low and you freeze."),
+    ("👖",  "Trousers insulation value contributed by what you are wearing."),
+    ("👕",  "Shirt insulation value contributed by what you are wearing."),
+    ("🪙",  "Coins — spend them in the shop, earn them by selling and completing quests."),
+    ("📚",  "Textbooks — read them to unlock new recipes and knowledge."),
+    ("🏆",  "Points — your score from survival, crafting, hunting and quests."),
+    ("🌡️",  "Body temperature — hypothermia below the safe band, heatstroke above it."),
+    ("🧭",  "Distance to the biome border. ↗️ heading to the Arctic, ↙️ back to the Forest."),
+    ("📍",  "Your current world coordinates."),
+    ("☀️",  "Daytime — animals are active and visibility is best."),
+    ("🌙",  "Night — colder, more dangerous, and you move slower."),
+    ("🐈",  "Your cat. High loyalty follows within 3 tiles; low loyalty hangs back around 5."),
+    ("🔥",  "You are on fire! Step into water or you keep taking damage."),
+    ("☣️",  "Active diseases and how many stacks of each you have."),
+    ("🪤",  "Traps you have placed: ⏳ still setting, 🟢 something is caught."),
+]
+
+
+# ==================== MOUSE CLICK ZONES ====================
+# Menus/pages register "row -> action" zones; the HUD sidebar registers
+# "row -> (col_start, col_end, action)" zones. Clicks are matched against
+# these tables so the mouse can drive menus and commands.
+_MENU_ZONES = {}
+_HUD_ZONES = {}
+_QUEUED_CMDS = []
+
+def menu_zones_clear():
+    _MENU_ZONES.clear()
+
+def menu_zone_add(row, action):
+    try: _MENU_ZONES[int(row)] = action
+    except Exception: pass
+
+def hud_zones_clear():
+    _HUD_ZONES.clear()
+
+def hud_zone_add(row, col_start, col_end, action):
+    try: _HUD_ZONES.setdefault(int(row), []).append((int(col_start), int(col_end), action))
+    except Exception: pass
+
+def parse_mouse(key):
+    """'MOUSE:col:row' -> (col, row) ints, or (None, None)."""
+    try:
+        _, c, r = str(key).split(":")
+        return int(c), int(r)
+    except Exception:
+        return None, None
+
+def menu_click_action(key):
+    c, r = parse_mouse(key)
+    if r is None: return None
+    return _MENU_ZONES.get(r)
+
+def menu_choice(ch):
+    """Digit keypress or 'IDX:n' click token -> int index (else None)."""
+    if not isinstance(ch, str): return None
+    if ch.startswith("IDX:"):
+        try: return int(ch[4:])
+        except Exception: return None
+    if len(ch) == 1 and ch.isdigit(): return int(ch)
+    return None
+
+def hud_click_action(key):
+    c, r = parse_mouse(key)
+    if r is None: return None
+    for c0, c1, act in _HUD_ZONES.get(r, []):
+        if c0 <= c <= c1: return act
+    return None
+
+def sidebar_cmd_click(raw_cmd):
+    """Clicked sidebar entry -> ('run', cmd) to execute, ('type', prefix) to
+    pre-fill the prompt (command needs an argument), or None."""
+    tok = str(raw_cmd).split("/")[0].strip()
+    if not any(ch.isalpha() for ch in tok):
+        return None
+    if "<" in tok:
+        return ("type", tok.split("<")[0].strip() + " ")
+    return ("run", tok)
+
+
+
+# ==================== HOVER TOOLTIPS ====================
+# Any renderer can register "row -> (col_start, col_end, text)" tooltip zones.
+# When the mouse hovers a zone the game draws a small floating box next to the
+# cursor. This is what lets the sidebar drop its inline descriptions (freeing
+# the space for many more commands) and what powers inventory / recipe /
+# stat explanations.
+_TIP_ZONES = {}
+_TIP_STATE = {"text": "", "col": 0, "row": 0}
+
+def tip_zones_clear():
+    _TIP_ZONES.clear()
+
+def tip_zone_add(row, col_start, col_end, text):
+    if not text:
+        return
+    try:
+        _TIP_ZONES.setdefault(int(row), []).append((int(col_start), int(col_end), str(text)))
+    except Exception:
+        pass
+
+def _parse_sgr_mouse_seq(seq):
+    """Parse an SGR mouse sequence like '35;12;34M' into ('HOVER'/'MOUSE', col, row)."""
+    if not seq:
+        return None
+    m = re.match(r"^(\d+);(\d+);(\d+)([Mm])$", str(seq).strip())
+    if not m:
+        return None
+    btn = int(m.group(1))
+    col = int(m.group(2))
+    row = int(m.group(3))
+    kind = "MOUSE" if m.group(4) in ("M", "m") and btn == 0 else "HOVER" if btn >= 32 else None
+    if kind is None:
+        return None
+    return kind, col, row
+
+
+def parse_hover(key):
+    """'HOVER:col:row' -> (col, row) ints, or (None, None)."""
+    try:
+        _, c, r = str(key).split(":")
+        return int(c), int(r)
+    except Exception:
+        return None, None
+
+def tip_lookup(col, row):
+    if col is None or row is None:
+        return None
+    for c0, c1, txt in _TIP_ZONES.get(row, []):
+        if c0 <= col <= c1:
+            return txt
+    return None
+
+def tooltip_set(col, row, text):
+    """Remember the hovered tooltip. Returns True when it changed (=> repaint)."""
+    text = text or ""
+    changed = (text != _TIP_STATE["text"]) or (text and (col, row) != (_TIP_STATE["col"], _TIP_STATE["row"]))
+    _TIP_STATE["text"] = text
+    _TIP_STATE["col"] = col or 0
+    _TIP_STATE["row"] = row or 0
+    return changed
+
+def tooltip_clear():
+    return tooltip_set(0, 0, "")
+
+def tooltip_hover(key):
+    """Handle a 'HOVER:col:row' key. Returns True if the screen should repaint."""
+    c, r = parse_hover(key)
+    if r is None:
+        return False
+    return tooltip_set(c, r, tip_lookup(c, r))
+
+def draw_tooltip(text=None, col=None, row=None):
+    """Paint the floating tooltip box. Cursor position is preserved."""
+    text = text if text is not None else _TIP_STATE["text"]
+    if not text:
+        return
+    col = col if col is not None else _TIP_STATE["col"]
+    row = row if row is not None else _TIP_STATE["row"]
+    try:
+        cols, rows = os.get_terminal_size()
+    except Exception:
+        cols, rows = TERM_WIDTH, 24
+    inner_max = max(16, min(56, cols - 8))
+    body = []
+    for para in str(text).split("\n"):
+        if para.strip():
+            body.extend(vwrap(para, inner_max))
+        else:
+            body.append("")
+    body = body[:14] or [""]
+    inner = min(inner_max, max(vlen(l) for l in body))
+    bw = inner + 4
+    bh = len(body) + 2
+    top = row + 1
+    if top + bh - 1 > rows:
+        top = row - bh
+    if top < 1:
+        top = 1
+    left = col + 1
+    if left + bw - 1 > cols:
+        left = cols - bw + 1
+    if left < 1:
+        left = 1
+    S = "\033[7m"      # reverse video — readable on every theme
+    E = "\033[0m"
+    out = ["\0337"]    # save cursor
+    out.append(f"\033[{top};{left}H{S}╭" + "─" * (bw - 2) + "╮" + E)
+
+    for i, l in enumerate(body):
+        out.append(f"\033[{top + 1 + i};{left}H{S}│ " + vfit(l, inner) + f" │{E}")
+    out.append(f"\033[{top + bh - 1};{left}H{S}╰" + "─" * (bw - 2) + f"╯{E}")
+    out.append("\0338")   # restore cursor
+    try:
+        sys.stdout.write("".join(out))
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def _build_commands_sidebar(width, height):
-    """Return up to `height` strings, each exactly `width` visual columns wide."""
+    """Build the command panel.
+
+    Returns (lines, cells) where `lines` are exactly `width` columns wide and
+    `cells` is a list of (line_index, col_start, col_end, raw_cmd, description)
+    with columns relative to the left edge of the panel (0-based). Descriptions
+    are never printed — they are shown as hover tooltips, which leaves room for
+    a two-column layout listing every single command."""
     if width < 12 or height < 3:
-        return [" " * width] * max(0, height)
-    title = "📜 COMMANDS"
-    lines = [vfit(title, width), vfit("─" * width, width)]
-    # Two-column layout inside the sidebar: cmd | desc
-    cmd_w = min(14, max(10, width // 2 - 1))
-    desc_w = width - cmd_w - 1
-    for cmd, desc in SIDEBAR_COMMANDS:
-        line = vfit(cmd, cmd_w) + " " + vfit(desc, desc_w)
-        lines.append(vfit(line, width))
+        return ([" " * width] * max(0, height), [])
+    lines = [vfit("📜 COMMANDS  (hover for details)", width), vfit("─" * width, width)]
+    cells = []
+    body_h = max(1, height - len(lines))
+    total = len(SIDEBAR_COMMANDS)
+    # Two columns whenever the panel is wide enough and one column would
+    # not fit every command.
+    col_w = max(13, min(20, (width - 1) // 2))
+    two_col = (width >= 28) and (total > body_h)
+    ncols = 2 if two_col else 1
+    if ncols == 1:
+        col_w = width
+    per_col = (total + ncols - 1) // ncols
+    per_col = max(1, min(per_col, body_h))
+    shown = SIDEBAR_COMMANDS[: per_col * ncols]
+    for r in range(per_col):
+        parts = []
+        for c in range(ncols):
+            idx = c * per_col + r
+            if idx < len(shown):
+                raw, desc = shown[idx]
+                c0 = c * (col_w + 1)
+                cells.append((len(lines), c0, c0 + col_w - 1, raw, desc))
+                parts.append(vfit(raw, col_w))
+            else:
+                parts.append(" " * col_w)
+        lines.append(vfit(" ".join(parts), width))
         if len(lines) >= height:
             break
     while len(lines) < height:
         lines.append(" " * width)
-    return lines[:height]
+    return (lines[:height], cells)
+
+
+def register_stat_tooltips(header_lines, row0=1, col0=0):
+    """Register hover tooltips for every stat token in the HUD header rows."""
+    try:
+        for i, line in enumerate(header_lines):
+            txt = re.sub(r"\033\[[0-9;?]*[ -/]*[@-~]", "", str(line))
+            row = row0 + i
+            pos = 0
+            for seg in txt.split("|"):
+                c0 = col0 + vlen(txt[:pos]) + 1
+                c1 = c0 + max(0, vlen(seg) - 1)
+                pos += len(seg) + 1
+                tip = None
+                for icon, desc in STAT_TOOLTIPS:
+                    if icon in seg:
+                        tip = desc
+                        break
+                if tip:
+                    tip_zone_add(row, c0, c1, tip)
+
+    except Exception:
+        pass
+
 
 
 # When Dev Mode is enabled from the start menu, the right-side sidebar shows
@@ -1160,6 +1584,7 @@ class SoundManager:
         self.inspect_channel = None
         self.gather_channel = None
         self.combat_bgm_channel = None
+        self.inventory_bgm_channel = None
         self.last_biome = None
         self.in_combat_bgm = False
         self._last_craft_station = None
@@ -1203,6 +1628,7 @@ class SoundManager:
                 self.inspect_channel = pygame.mixer.Channel(4)
                 self.gather_channel = pygame.mixer.Channel(5)
                 self.combat_bgm_channel = pygame.mixer.Channel(6)
+                self.inventory_bgm_channel = pygame.mixer.Channel(7)
                 self.enabled = True
                 self._load_sounds()
                 self._load_cat_meows()
@@ -1317,6 +1743,9 @@ class SoundManager:
         bas_n = [87, 98, 87, 110, 87, 98, 110, 87]
         bas_d = [b_total/8]*8
         self.sounds["forest"] = mk(mx(rs(mel_n, mel_d, vol=0.13), rs(bas_n, bas_d, vol=0.065, shape="triangle")))
+        # Synth loop is only a last-resort fallback; the real ambience is the
+        # "Adrift" track in assets/ (see _ensure_bgm_track).
+        self.sounds["ambient_fallback"] = self.sounds["forest"]
 
         # ── Arctic BGM: very slow, low, sparse — all notes ≤ 247 Hz ─────────────
         arc_n = [175,196,220,196,175,165,175,196]
@@ -1324,6 +1753,21 @@ class SoundManager:
         a_total = sum(arc_d)
         drn_n = [82,82,82,82]; drn_d = [a_total/4]*4
         self.sounds["arctic"] = mk(mx(rs(arc_n, arc_d, vol=0.11), rs(drn_n, drn_d, vol=0.055, shape="triangle")))
+        # Expose as "arctic_bgm" for the biome BGM system
+        self.sounds["arctic_bgm"] = self.sounds["arctic"]
+
+        # ── Inventory / menu BGM: calm, gentle arpeggios in C-major ──────────────
+        # Slow treble melody (C4=261, E4=330, G4=392, A4=440, G4=392 ...)
+        inv_mel_n = [261, 330, 392, 440, 392, 330, 261, 294, 330, 392, 330, 261]
+        inv_mel_d = [1.1, 0.9, 1.0, 1.3, 0.9, 0.9, 1.4, 0.9, 0.9, 1.2, 0.9, 1.6]
+        # Soft mid-register harmony, one octave lower
+        inv_hrm_n = [130, 165, 196, 220, 196, 165, 130, 147, 165, 196, 165, 130]
+        # Slow bass drone on C2/G2
+        inv_pad_total = sum(inv_mel_d)
+        inv_bas_n = [65, 65, 98, 98]; inv_bas_d = [inv_pad_total / 4] * 4
+        # inventory_bgm is loaded lazily from assets/inventory_music.ogg;
+        # leave as None here so _ensure_inventory_bgm() always tries the file.
+        self.sounds["inventory_bgm"] = None
 
         # ── Intro jingle ─────────────────────────────────────────────────────
         self.sounds["intro"] = mk(rs([330,392,440,523,440,523,659,784],[0.12,0.10,0.10,0.14,0.10,0.10,0.12,0.35], vol=0.15))
@@ -1766,9 +2210,8 @@ class SoundManager:
     def _asset_sound(filename):
         """Load an OGG/WAV from the assets/ folder next to 9planets.py.
         Returns a pygame.mixer.Sound on success, or None if the file is missing."""
-        import pathlib
-        path = pathlib.Path(__file__).parent / "assets" / filename
-        if not path.exists():
+        path = resolve_asset_path(filename)
+        if not path:
             return None
         try:
             return pygame.mixer.Sound(str(path))
@@ -1931,6 +2374,75 @@ class SoundManager:
             if self.gather_channel: self.gather_channel.stop()
         except Exception: pass
 
+    def _ensure_inventory_bgm(self):
+        """Lazily load the inventory / main-menu track from assets/."""
+        if not self.enabled:
+            return None
+        snd = self.sounds.get("inventory_bgm")
+        if snd is not None:
+            return snd
+        path = resolve_inventory_track()
+        if path is not None:
+            try:
+                snd = pygame.mixer.Sound(str(path))
+            except Exception:
+                snd = None
+        if snd is not None:
+            self.sounds["inventory_bgm"] = snd
+        return snd
+
+    def _inventory_channel(self):
+        ch = self.inventory_bgm_channel
+        if ch is None:
+            try:
+                ch = pygame.mixer.Channel(7)
+            except Exception:
+                try:
+                    ch = pygame.mixer.find_channel(True)
+                except Exception:
+                    ch = None
+            self.inventory_bgm_channel = ch
+        return ch
+
+    def inventory_bgm_playing(self):
+        try:
+            ch = self.inventory_bgm_channel
+            return bool(ch and ch.get_busy())
+        except Exception:
+            return False
+
+    def start_inventory_bgm(self):
+        """Play the inventory track, ducking ambience. Skipped during battle music."""
+        if not self.enabled or self.in_combat_bgm:
+            return
+        if self.inventory_bgm_playing():
+            return
+        try:
+            snd = self._ensure_inventory_bgm()
+            ch = self._inventory_channel()
+            if not snd or not ch:
+                return
+            if self.bgm_channel:
+                try: self.bgm_channel.set_volume(0.0)
+                except Exception: pass
+            try: snd.set_volume(0.45)
+            except Exception: pass
+            ch.play(snd, loops=-1)
+        except Exception:
+            pass
+
+    def stop_inventory_bgm(self):
+        try:
+            if self.inventory_bgm_channel:
+                self.inventory_bgm_channel.stop()
+        except Exception:
+            pass
+        try:
+            if self.bgm_channel and not self.in_combat_bgm:
+                self.bgm_channel.set_volume(0.85)
+        except Exception:
+            pass
+
     def _ensure_combat_bgm(self):
         """Lazily load the battle track from assets/ if it is missing."""
         if not self.enabled:
@@ -1976,6 +2488,8 @@ class SoundManager:
         if not filename:
             return None
         snd = self._asset_sound(filename)
+        if snd is None and key == "ambient_bgm":
+            snd = self.sounds.get("ambient_fallback")
         if snd is not None:
             self.sounds[key] = snd
         return snd
@@ -2101,7 +2615,8 @@ class SoundManager:
         if not self.enabled: return
         try:
             for ch in (self.inspect_channel, self.craft_channel,
-                       self.gather_channel, self.combat_bgm_channel):
+                       self.gather_channel, self.combat_bgm_channel,
+                       self.inventory_bgm_channel):
                 if ch: ch.stop()
         except Exception: pass
         # The battle track was stopped above — clear the flag so the next combat
@@ -3379,6 +3894,102 @@ def display_item_name(item):
     item = str(item)
     return DISPLAY_ITEM_NAME_MAP.get(item, item.replace("_"," ").title())
 
+
+def recipe_tooltip_text(recipe_key, recipe_def=None):
+    """Return a multi-line tooltip for a recipe entry."""
+    recipe_def = recipe_def or RECIPES.get(recipe_key, {})
+    title = display_item_name(recipe_key) or recipe_key.replace("_", " ").title()
+    lines = [title]
+    lines.append("─" * max(len(lines[0]), 12))
+    if not recipe_def:
+        return "\n".join(lines)
+    mat_parts = []
+    for m, n in recipe_def.get("mat", {}).items():
+        label = "any berry" if m == "any_berry" else m.replace("_", " ")
+        mat_parts.append(f"{n}× {label}")
+    if mat_parts:
+        lines.append("🔨 Materials: " + ", ".join(mat_parts))
+    station = recipe_def.get("station")
+    if station:
+        if isinstance(station, list):
+            station = " + ".join(s.replace("_", " ") for s in station)
+        else:
+            station = station.replace("_", " ")
+        lines.append(f"🏭 Station: {station}")
+    if recipe_def.get("igm") is not None:
+        lines.append(f"⏱️ Time: {recipe_def.get('igm', 0)}s")
+    if recipe_def.get("energy") is not None:
+        lines.append(f"⚡ Energy: {recipe_def.get('energy', 0)}")
+    if recipe_def.get("fuel") is not None:
+        lines.append(f"🪵 Fuel: {recipe_def.get('fuel')}" )
+    return "\n".join(lines)
+
+
+def item_tooltip_text(item_key, qty=None):
+    """Return a multi-line tooltip string for any inventory item.
+    Pulls from food_effects, SPEAR_DEFS, RECIPES, ITEM_PRICES, and ARMOR_DEFS."""
+    lines = [display_item_name(item_key) + (f"  ×{qty}" if qty else "")]
+    lines.append("─" * max(len(lines[0]), 12))
+
+    # --- Food / drink effects ---
+    fe = food_effects.get(item_key)
+    if fe:
+        effects = []
+        if fe.get("health",0)  != 0: effects.append(f"❤️ Health  {fe['health']:+d}")
+        if fe.get("hunger",0)  != 0: effects.append(f"🍽️ Hunger  {fe['hunger']:+d}")
+        if fe.get("thirst",0)  != 0: effects.append(f"💧 Thirst  {fe['thirst']:+d}")
+        if fe.get("energy",0)  != 0: effects.append(f"⚡ Energy  {fe['energy']:+d}")
+        lines.extend(effects)
+        if fe.get("notes"): lines.append(fe["notes"])
+        risk = fe.get("risk","")
+        if risk and risk not in ("low",):
+            dmg = fe.get("risk_dmg", "?")
+            lines.append(f"⚠️ Risk ({risk}): -{dmg} HP")
+
+    # --- Spear / weapon stats ---
+    try:
+        from_spear = SPEAR_DEFS.get(item_key, {})
+        if from_spear:
+            if from_spear.get("throw"): lines.append(f"🎯 Throw dmg: {from_spear['throw']}")
+            if from_spear.get("strike"): lines.append(f"⚔️ Strike dmg: {from_spear['strike']}")
+            if from_spear.get("dur"):   lines.append(f"🔧 Durability: {from_spear['dur']}")
+    except Exception: pass
+
+    # --- Armor ---
+    try:
+        armor_info = {"light_armor":(20,500,"light"), "medium_armor":(40,1000,"medium"), "heavy_armor":(70,1800,"heavy")}
+        if item_key in armor_info:
+            pct, dur, _ = armor_info[item_key]
+            lines.append(f"🛡️ Damage reduction: {pct}%")
+            lines.append(f"🔧 Durability: {dur}")
+    except Exception: pass
+
+    # --- Recipe (how to craft it) ---
+    try:
+        recipe = RECIPES.get(item_key)
+        if recipe:
+            mat_parts = []
+            for m, n in recipe.get("mat",{}).items():
+                label = "any berry" if m == "any_berry" else m.replace("_"," ")
+                mat_parts.append(f"{n}× {label}")
+            lines.append("🔨 Craft: " + (", ".join(mat_parts) or "—"))
+            st = recipe.get("station")
+            if st:
+                if isinstance(st, list): st = " + ".join(s.replace("_"," ") for s in st)
+                else: st = st.replace("_"," ")
+                lines.append(f"   @ {st}")
+    except Exception: pass
+
+    # --- Shop price ---
+    try:
+        price = ITEM_PRICES.get(item_key)
+        if price:
+            lines.append(f"🪙 Sell: {price}  Buy: {int(price*1.5)}")
+    except Exception: pass
+
+    return "\n".join(lines) if len(lines) > 2 else ""
+
+
 # ==================== GAME DATA ====================
 food_effects = {
     "mushrooms":         {"energy": 25, "hunger": 20, "health": 0,   "thirst": 0},
@@ -4638,6 +5249,10 @@ class Terminal:
         self._red_flash_times = []
         self._yellow_flash_times = []
         self.using_windows_fallback = not HAVE_TERMIOS
+        self._win_stdin = None
+        self._win_k32 = None
+        self._win_old_mode = None
+        self._win_mouse_ok = False
         if self.using_windows_fallback:
             self.fd = None
             self.old = None
@@ -4650,11 +5265,15 @@ class Terminal:
         _ACTIVE_TERM = self
 
     def setup(self):
-        if not self.using_windows_fallback:
-            tty.setraw(self.fd)
+        if self.using_windows_fallback:
+            self._win_setup_console(mouse=True)
+            return
+        tty.setraw(self.fd)
 
     def cleanup(self):
         sys.stdout.write("\033[2J\033[1;1H\033[?25h\033[0m")
+        if self.using_windows_fallback:
+            self._win_restore_console()
         if not self.using_windows_fallback:
             termios.tcsetattr(self.fd, termios.TCSANOW, self.old)
         sys.stdout.flush()
@@ -4667,8 +5286,132 @@ class Terminal:
             return "\033[47m\033[30m"
         return "\033[40m\033[37m"
 
+
+    # ──────────────── Windows console mouse + key support ────────────────
+    # msvcrt can't see mouse events and conhost/Windows Terminal doesn't emit
+    # SGR sequences unless we ask the console API directly, so on Windows we
+    # read raw INPUT_RECORDs (keys *and* clicks) via ctypes.
+    def _win_setup_console(self, mouse=True):
+        if not getattr(self, "using_windows_fallback", False):
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32 = ctypes.windll.kernel32
+            h = k32.GetStdHandle(-10)  # STD_INPUT_HANDLE
+            if not h or h == wintypes.HANDLE(-1).value:
+                return False
+            old = wintypes.DWORD()
+            if not k32.GetConsoleMode(h, ctypes.byref(old)):
+                return False
+            if getattr(self, "_win_old_mode", None) is None:
+                self._win_old_mode = old.value
+            ENABLE_MOUSE_INPUT = 0x0010
+            ENABLE_EXTENDED_FLAGS = 0x0080
+            ENABLE_QUICK_EDIT = 0x0040
+            ENABLE_LINE_INPUT = 0x0002
+            ENABLE_ECHO_INPUT = 0x0004
+            ENABLE_PROCESSED_INPUT = 0x0001
+            mode = old.value
+            mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT | ENABLE_PROCESSED_INPUT)
+            mode |= ENABLE_EXTENDED_FLAGS
+            if mouse:
+                mode |= ENABLE_MOUSE_INPUT
+            if not k32.SetConsoleMode(h, mode):
+                return False
+            self._win_stdin = h
+            self._win_k32 = k32
+            self._win_mouse_ok = bool(mouse)
+            return True
+        except Exception:
+            return False
+
+    def _win_restore_console(self):
+        try:
+            if getattr(self, "_win_old_mode", None) is not None and getattr(self, "_win_k32", None):
+                self._win_k32.SetConsoleMode(self._win_stdin, self._win_old_mode)
+        except Exception:
+            pass
+        self._win_mouse_ok = False
+
+    def _win_read_event(self, timeout=0.1):
+        """Return a key string, 'MOUSE:col:row', or None (Windows only)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+        except Exception:
+            return None
+        k32 = getattr(self, "_win_k32", None)
+        h = getattr(self, "_win_stdin", None)
+        if not k32 or not h:
+            return None
+
+        class _COORD(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class _CHAR(ctypes.Union):
+            _fields_ = [("UnicodeChar", ctypes.c_wchar), ("AsciiChar", ctypes.c_char)]
+
+        class _KEY(ctypes.Structure):
+            _fields_ = [("bKeyDown", wintypes.BOOL),
+                        ("wRepeatCount", ctypes.c_ushort),
+                        ("wVirtualKeyCode", ctypes.c_ushort),
+                        ("wVirtualScanCode", ctypes.c_ushort),
+                        ("uChar", _CHAR),
+                        ("dwControlKeyState", wintypes.DWORD)]
+
+        class _MOUSE(ctypes.Structure):
+            _fields_ = [("dwMousePosition", _COORD),
+                        ("dwButtonState", wintypes.DWORD),
+                        ("dwControlKeyState", wintypes.DWORD),
+                        ("dwEventFlags", wintypes.DWORD)]
+
+        class _EVENT(ctypes.Union):
+            _fields_ = [("KeyEvent", _KEY), ("MouseEvent", _MOUSE),
+                        ("pad", ctypes.c_byte * 32)]
+
+        class _RECORD(ctypes.Structure):
+            _fields_ = [("EventType", ctypes.c_ushort), ("Event", _EVENT)]
+
+        deadline = time.time() + max(0.0, timeout)
+        vk_map = {0x26: 'UP', 0x28: 'DOWN', 0x25: 'LEFT', 0x27: 'RIGHT'}
+        rec = _RECORD()
+        nread = wintypes.DWORD()
+        navail = wintypes.DWORD()
+        while True:
+            try:
+                if not k32.GetNumberOfConsoleInputEvents(h, ctypes.byref(navail)) or navail.value == 0:
+                    if time.time() >= deadline:
+                        return None
+                    time.sleep(0.005)
+                    continue
+                if not k32.ReadConsoleInputW(h, ctypes.byref(rec), 1, ctypes.byref(nread)) or nread.value == 0:
+                    return None
+            except Exception:
+                return None
+            if rec.EventType == 0x0001:  # KEY_EVENT
+                ke = rec.Event.KeyEvent
+                if not ke.bKeyDown:
+                    continue
+                if ke.wVirtualKeyCode in vk_map:
+                    return vk_map[ke.wVirtualKeyCode]
+                ch = ke.uChar.UnicodeChar
+                if ch and ch != '\x00':
+                    return ch
+                continue
+            if rec.EventType == 0x0002 and getattr(self, "_win_mouse_ok", False):  # MOUSE_EVENT
+                me = rec.Event.MouseEvent
+                # dwEventFlags 0 == button press/release; left button == bit 0
+                if me.dwEventFlags == 0 and (me.dwButtonState & 0x0001):
+                    return "MOUSE:%d:%d" % (me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1)
+                continue
+            if time.time() >= deadline:
+                return None
+
     def get_key(self, timeout=0.1):
         if self.using_windows_fallback:
+            if getattr(self, "_win_stdin", None):
+                return self._win_read_event(timeout)
             start = time.time()
             while time.time() - start < timeout:
                 if msvcrt.kbhit():
@@ -4691,12 +5434,30 @@ class Terminal:
         if char == '\x1b':
             r2, _, _ = select.select([self.fd], [], [], 0.05)
             if r2:
-                seq = os.read(self.fd, 16).decode('utf-8', errors='ignore')
+                seq = os.read(self.fd, 32).decode('utf-8', errors='ignore')
                 key_result = None
                 if seq.startswith("[A"): key_result = 'UP'
                 elif seq.startswith("[B"): key_result = 'DOWN'
                 elif seq.startswith("[C"): key_result = 'RIGHT'
                 elif seq.startswith("[D"): key_result = 'LEFT'
+                elif seq.startswith("[<"):
+                    # SGR extended mouse: \033[<btn;col;rowM (press) or m (release).
+                    # With motion reporting on (?1003h) we also get "no button"
+                    # move events (btn 35) which drive the hover tooltips.
+                    _mm = None
+                    for _mm in re.finditer(r'\[<(\d+);(\d+);(\d+)([Mm])', seq):
+                        pass
+                    if _mm:
+                        _btn = int(_mm.group(1))
+                        _cx  = int(_mm.group(2))
+                        _cy  = int(_mm.group(3))
+                        _act = _mm.group(4)
+                        if _act in ('M', 'm') and _btn == 0:
+                            return f"MOUSE:{_cx}:{_cy}"
+                        if _btn >= 32:       # motion / drag => hover
+                            return f"HOVER:{_cx}:{_cy}"
+                    return None
+
                 if key_result:
                     # Actively drain queued key-repeat bursts until the input
                     # has been quiet for a short settle window. This stops the
@@ -4718,6 +5479,11 @@ class Terminal:
 
     def get_key_no_flush(self, timeout=0.1):
         if self.using_windows_fallback:
+            if getattr(self, "_win_stdin", None):
+                k = self._win_read_event(timeout)
+                if k == '\x1b':
+                    return 'ESC'
+                return k
             start = time.time()
             while time.time() - start < timeout:
                 if msvcrt.kbhit():
@@ -4740,7 +5506,7 @@ class Terminal:
         if char == '\x1b':
             r2, _, _ = select.select([self.fd], [], [], 0.05)
             if r2:
-                seq = os.read(self.fd, 16).decode('utf-8', errors='ignore')
+                seq = os.read(self.fd, 32).decode('utf-8', errors='ignore')
                 if seq.startswith("[A"):
                     try: termios.tcflush(self.fd, termios.TCIFLUSH)
                     except Exception: pass
@@ -4749,35 +5515,97 @@ class Terminal:
                     try: termios.tcflush(self.fd, termios.TCIFLUSH)
                     except Exception: pass
                     return 'DOWN'
+                if seq.startswith("[<"):
+                    _mm = None
+                    for _mm in re.finditer(r'\[<(\d+);(\d+);(\d+)([Mm])', seq):
+                        pass
+                    if _mm:
+                        _btn = int(_mm.group(1))
+                        _cx  = int(_mm.group(2))
+                        _cy  = int(_mm.group(3))
+                        _act = _mm.group(4)
+                        if _act in ('M', 'm') and _btn == 0:
+                            return f"MOUSE:{_cx}:{_cy}"
+                        if _btn >= 32:
+                            return f"HOVER:{_cx}:{_cy}"
+                    return None
             return 'ESC'
         return char
 
-    def show_menu(self, lines):
+    def enable_mouse(self):
+        """Enable mouse click + motion reporting (motion powers the tooltips)."""
+        if getattr(self, 'using_windows_fallback', False):
+            self._win_setup_console(mouse=True)
+            return
+        # 1000 = clicks, 1002 = drag motion, 1003 = any motion, 1006 = SGR coords
+        sys.stdout.write("\033[?1000h\033[?1002h\033[?1003h\033[?1006h")
+        sys.stdout.flush()
+
+    def disable_mouse(self):
+        """Disable mouse reporting and restore normal terminal state."""
+        if getattr(self, 'using_windows_fallback', False):
+            self._win_restore_console()
+            return
+        sys.stdout.write("\033[?1003l\033[?1002l\033[?1000l\033[?1006l")
+        sys.stdout.flush()
+
+
+    def show_menu(self, lines, zones=None):
+        # Register click zones: any "  N. Label" line becomes clickable, plus
+        # any explicit {line_index: action} zones the caller passes in.
+        menu_zones_clear()
+        for _i, _l in enumerate(lines):
+            _m = re.match(r"\s*(\d+)\.", str(_l))
+            if _m: menu_zone_add(_i + 1, "IDX:" + _m.group(1))
+        if zones:
+            for _i, _act in zones.items():
+                menu_zone_add(_i + 1, _act)
         # Flicker-free repaint: home cursor and overwrite each line with EL (clear-to-EOL),
         # then ED (clear-to-EOS) to wipe any leftover rows. Avoids the \033[2J blank-then-draw flash.
         out = "\033[K\r\n".join(vfit(str(l), TERM_WIDTH) for l in lines)
         theme = self._theme_prefix(getattr(self, "pause_context_player", None))
         sys.stdout.write("\033[?25l\033[H" + theme + out + "\033[K\r\n\033[J\033[?25h"); sys.stdout.flush()
 
-    def print_page(self, lines, wait=True):
+    def print_page(self, lines, wait=True, zones=None):
+        """Render a page. `zones` maps source-line index -> click action.
+        Returns the clicked action (or None when closed with Enter)."""
         wait_started = time.time() if wait else None
         wrapped = []
-        for l in lines:
+        menu_zones_clear()
+        for _si, l in enumerate(lines):
+            _start_row = len(wrapped) + 1
             if l == "":
                 wrapped.append("")
             else:
                 wrapped.extend(vwrap(str(l), TERM_WIDTH))
+            if zones and _si in zones:
+                menu_zone_add(_start_row, zones[_si])
         # Flicker-free repaint: overwrite in place instead of clearing first.
         out = "\033[K\r\n".join(vfit(str(l), TERM_WIDTH) for l in wrapped)
         if wait: out += "\033[K\r\n\033[K\r\n  [Press Enter to continue]"
         theme = self._theme_prefix(getattr(self, "pause_context_player", None))
         sys.stdout.write("\033[?25l\033[H" + theme + out + "\033[K\033[J\033[?25h"); sys.stdout.flush()
         if wait:
+            _clicked = None
             while True:
                 k = self.get_key_no_flush(0.5)
                 if k in ('\r', '\n'): break
+                if isinstance(k, str) and k.startswith("HOVER:"):
+                    if tooltip_hover(k):
+                        # Repaint page + fresh tooltip without full-screen flash
+                        sys.stdout.write("\033[?25l\033[H" + theme + out + "\033[K\033[J\033[?25h")
+                        sys.stdout.flush()
+                        draw_tooltip()
+                    continue
+                if isinstance(k, str) and k.startswith("MOUSE:"):
+                    _a = menu_click_action(k)
+                    if _a:
+                        _clicked = _a; break
             freeze_blocking_time(self.pause_context_player, self.pause_context_world, self.pause_context_weather, time.time() - wait_started)
+            tooltip_clear()
             sys.stdout.write("\033[H\033[J"); sys.stdout.flush()
+            return _clicked
+        return None
 
     def flash_white(self):
         """Brief white-screen flash."""
@@ -4843,6 +5671,7 @@ class Terminal:
         Frame 2 (odd second) : normal emojis; fallback frame2 = □.
         """
         theme = self._theme_prefix(player)
+        tip_zones_clear()
         try:
             cols, term_h = os.get_terminal_size()
         except Exception:
@@ -4924,6 +5753,13 @@ class Terminal:
         hh = MAP_TILE_H // 2
         ox = px - hw
         oy = py - hh
+
+        # Store map geometry on player so click-to-walk can convert terminal
+        # (col, row) → world tile without re-running the render math.
+        player._gm_ox      = ox
+        player._gm_oy      = oy
+        player._gm_tile_w  = MAP_TILE_W
+        player._gm_tile_h  = MAP_TILE_H
 
         # ── Build cell grid ───────────────────────────────────────────────
         cells = {}
@@ -5040,6 +5876,7 @@ class Terminal:
 
         # ── Right panel ───────────────────────────────────────────────────
         right_w = max(10, cols - map_panel_w - 3)   # 3 = " │ " separator
+        panel_c0 = map_panel_w + 4
 
         # ── TOP SECTION ───────────────────────────────────────────────────
         # Split into ESSENTIAL rows (always shown) and OPTIONAL rows
@@ -5178,6 +6015,8 @@ class Terminal:
         optional.append(" " * right_w)
         optional.extend(_msg_rows)
 
+        register_stat_tooltips(essential, row0=1, col0=panel_c0)
+
         # Compose top with priority: essential always, optional truncated
         # from the end if it won't fit alongside bottom (2 rows) + cmd panel.
         # Reserve at least 2 rows for bottom (tile info + prompt).
@@ -5287,15 +6126,17 @@ class Terminal:
             # Scroll indicator
             if _scroll_off > 0:
                 cmd_lines.append(vfit(f"  ▲ {_scroll_off} more above", right_w))
+            _cmd_row_tokens = {}
             for _raw_cmd, _desc in _visible_cmds:
                 if len(cmd_lines) >= available:
                     break
+                _cmd_row_tokens[len(cmd_lines)] = _raw_cmd
                 _tok = _raw_cmd.split("/")[0].split("<")[0].strip()
                 _is_tab = (any(c.isalpha() for c in _tok) and
                            0 <= _gm_tab_idx < len(_tab_cmd_tokens) and
                            _tab_cmd_tokens[_gm_tab_idx] == _tok)
                 _pfx = "▶ " if _is_tab else "  "
-                _line = _pfx + vfit(_raw_cmd, ck_w) + " " + vfit(_desc, cd_w)
+                _line = _pfx + vfit(_raw_cmd, max(1, right_w - 2))
                 cmd_lines.append(vfit(_line, right_w))
             _remaining = len(_all_scmds) - _scroll_off - len(_visible_cmds[:_content_h])
             if _remaining > 0 and len(cmd_lines) < available:
@@ -5309,6 +6150,17 @@ class Terminal:
         cmd_lines = cmd_lines[:available]
 
         right = (top + cmd_lines + bottom)[:term_h]
+
+        # ── Clickable command rows (right panel) ──────────────────────────
+        hud_zones_clear()
+        try:
+            _zcol0 = panel_c0   # left panel + " │ "
+            for _ci, _rawc in (locals().get("_cmd_row_tokens") or {}).items():
+                _zrow = len(top) + _ci + 1
+                hud_zone_add(_zrow, _zcol0, _zcol0 + right_w, "CMD:" + _rawc)
+                tip_zone_add(_zrow, _zcol0, _zcol0 + right_w, _rawc + "\n\n" + (next((desc for rc, desc in SIDEBAR_COMMANDS if rc.split('/')[0].split('<')[0].strip() == _rawc), "")))
+        except Exception:
+            pass
 
         # ── Combine panels and write ──────────────────────────────────────
         # vfit on both sides guarantees the │ separator is always at the same
@@ -5488,6 +6340,18 @@ class Terminal:
         max_scan = max(0, term_h - reserved)
         scan = scan[:max_scan]
 
+        # Build click-to-walk map for standard mode: terminal row (1-indexed) →
+        # (world_x, world_y).  Scan lines start just below the header separator.
+        if player is not None:
+            _std_click_map = {}
+            _scan_row_start = len(header_lines) + 2  # 1 = header, 2 = separator row
+            for _si, _sl in enumerate(scan):
+                _cm = re.search(r'@\((-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)\)', str(_sl))
+                if _cm:
+                    _std_click_map[_scan_row_start + _si] = (int(float(_cm.group(1))), int(float(_cm.group(2))))
+            player._std_click_row_map  = _std_click_map
+            player._std_header_rows    = len(header_lines) + 1
+
         out = list(header_lines)
         out.append("─" * draw_w)
         out.extend(scan)
@@ -5506,12 +6370,16 @@ class Terminal:
         # ---- Right-side commands sidebar (wide terminals only) ----
         sidebar_w = 0
         sidebar_lines = []
+        sidebar_cells = []
+        hud_zones_clear()
+        tip_zones_clear()
+        register_stat_tooltips(header_lines, row0=1, col0=0)
         if draw_w >= 100:
-            sidebar_w = min(40, max(28, draw_w // 4))
+            sidebar_w = min(44, max(28, draw_w // 4))
             if _DEV_MODE:
                 sidebar_lines = _build_dev_sidebar(sidebar_w, term_h, _g_world, player)
             else:
-                sidebar_lines = _build_commands_sidebar(sidebar_w, term_h)
+                sidebar_lines, sidebar_cells = _build_commands_sidebar(sidebar_w, term_h)
         if sidebar_w > 0:
             sep = " │ "
             main_w = draw_w - sidebar_w - vlen(sep)
@@ -5523,8 +6391,19 @@ class Terminal:
             side_rows = max(0, term_h - header_rows)
             if _DEV_MODE:
                 sidebar_lines = _build_dev_sidebar(sidebar_w, side_rows, _g_world, player)
+                sidebar_cells = []
             else:
-                sidebar_lines = _build_commands_sidebar(sidebar_w, side_rows)
+                sidebar_lines, sidebar_cells = _build_commands_sidebar(sidebar_w, side_rows)
+            # Clickable + hoverable command cells (two-column layout).
+            hud_zones_clear()
+            if not _DEV_MODE:
+                _zcol0 = main_w + vlen(sep) + 1
+                for _j, _c0, _c1, _rawc, _desc in sidebar_cells:
+                    _row = header_rows + _j + 1
+                    hud_zone_add(_row, _zcol0 + _c0, _zcol0 + _c1, "CMD:" + _rawc)
+                    tip_zone_add(_row, _zcol0 + _c0, _zcol0 + _c1,
+                                 _rawc + "\n\n" + _desc)
+
             merged = []
             for i, line in enumerate(out):
                 if i < header_rows:
@@ -5553,6 +6432,9 @@ class Terminal:
         # Ensure cursor doesn't go off-screen
         if cursor_col > draw_w: cursor_col = draw_w
         sys.stdout.write(f"\033[{term_h};{cursor_col}H\033[?25h"); sys.stdout.flush()
+        # Floating hover tooltip is painted last so it sits above everything.
+        draw_tooltip()
+
 
 # ==================== TUTORIAL ====================
 def run_tutorial(term):
@@ -7711,7 +8593,7 @@ class World:
 
     def update_fire(self, weather, player):
         now = time.time()
-        if now - self.last_fire_tick < 0.5:
+        if now - self.last_fire_tick < 1.0:   # one spread per real second
             return
         self.last_fire_tick = now
         if not weather.firestorm_active:
@@ -10216,6 +11098,7 @@ def enter_house_mode(term, player, world, house, weather, msg_out):
             elif act in ("help","?"):
                 show_house_help()
             elif act in ("inv","inventory"):
+                _inventory_music_on()
                 inv_lines = ["🎒 INVENTORY", "─" * TERM_WIDTH, ""]
                 for k,v in sorted(player.inventory.items()):
                     if k.startswith("unknown_") or not isinstance(v, int) or v <= 0:
@@ -10223,6 +11106,7 @@ def enter_house_mode(term, player, world, house, weather, msg_out):
                     inv_lines.append(f"  {display_item_name(k):<30} {v}")
                 inv_lines.append("")
                 term.print_page(inv_lines)
+                _inventory_music_off()
             elif act == "shop":
                 cat_keys = list(SHOP_CATEGORIES.keys())
                 term.show_menu(["🏪 SHOP", "─"*TERM_WIDTH] + [f"  {k}" for k in cat_keys] + ["","  Press number. Enter to close."])
@@ -10881,6 +11765,15 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     hint = action_hint or "[↑]up [↓]dn [←]lt [→]rt [S/A/E]strike [T]throw [B]block [P]pass [Q]quit"
     lines.append(vfit(f"  {hint}", TERM_WIDTH))
 
+    # Store grid origin on player so click-to-walk can convert terminal
+    # (col, row) → world tile.  Grid rows start at terminal row 3 (1-indexed),
+    # cols start at terminal col 3 (2-space indent), each cell is 2 cols wide.
+    try:
+        player._grid_gm_ox = grid_ox
+        player._grid_gm_oy = grid_oy
+    except Exception:
+        pass
+
     sys.stdout.write("\033[2J\033[H" + "\r\n".join(lines))
     sys.stdout.flush()
 
@@ -11400,6 +12293,35 @@ def run_grid_mode(term, player, world, initial_targets, msg_out=None):
         elif key in ("p","P","\r","\n"):
             # Pass — end player turn
             player_energy=0
+        elif key and isinstance(key, str) and key.startswith("MOUSE:"):
+            # Click-to-walk inside grid mode: move one step toward the clicked tile
+            # each turn (respects per-turn energy cost).
+            try:
+                _, _gscx, _gscy = key.split(":")
+                _gscx, _gscy = int(_gscx), int(_gscy)
+                _gox = getattr(player, "_grid_gm_ox", None)
+                _goy = getattr(player, "_grid_gm_oy", None)
+                if _gox is not None:
+                    _gi = (_gscx - 3) // 2   # 2-space indent → cells at col 3+
+                    _gj = _gscy - 3           # 2 header rows → grid at row 3+
+                    _GS = GRID_SIZE
+                    if 0 <= _gi < _GS and 0 <= _gj < _GS:
+                        _twx = _gi + _gox
+                        _twy = _gj + _goy
+                        _px_i, _py_i = _world_tile(player.x, player.y)
+                        _dx = 1 if _twx > _px_i else (-1 if _twx < _px_i else 0)
+                        _dy = 1 if _twy > _py_i else (-1 if _twy < _py_i else 0)
+                        if (_dx != 0 or _dy != 0) and player_energy >= 8:
+                            if _dx != 0: player.x += _dx
+                            elif _dy != 0: player.y += _dy
+                            player_energy -= 8
+                            last_move_time = time.time()
+                            moved = True
+                        elif player_energy < 8:
+                            add_msg("⚡ Not enough energy to move (8).")
+            except Exception:
+                pass
+
         elif key in ("q","Q"):
             # Quitting grid mode: enemies get one free turn (they strike),
             # then you exit with a 10-second grace window to escape.
@@ -12166,18 +13088,56 @@ def delete_save(save_name):
             return False, f"❌ Failed to delete: {e}"
     return False, f"❌ Save '{save_name}' not found."
 
+_PS_RAW = {"fd": None, "old": None}
+
+def _ps_raw_on():
+    """Put the terminal in raw mode for the whole menu loop.
+
+    This is REQUIRED for mouse clicks: in cooked (canonical) mode the bytes of
+    a mouse escape sequence sit in the line buffer until Enter is pressed, so
+    clicks were silently swallowed on the main menu. Everywhere else the game
+    holds raw mode open, which is why clicking worked there and not here."""
+    if not HAVE_TERMIOS or _PS_RAW["fd"] is not None:
+        return
+    import tty as _tty, termios as _termios
+    try:
+        fd = sys.stdin.fileno()
+        _PS_RAW["old"] = _termios.tcgetattr(fd)
+        _PS_RAW["fd"] = fd
+        _tty.setraw(fd)
+    except Exception:
+        _PS_RAW["fd"] = None
+        _PS_RAW["old"] = None
+
+def _ps_raw_off():
+    if not HAVE_TERMIOS or _PS_RAW["fd"] is None:
+        return
+    import termios as _termios
+    try:
+        _termios.tcsetattr(_PS_RAW["fd"], _termios.TCSADRAIN, _PS_RAW["old"])
+    except Exception:
+        pass
+    _PS_RAW["fd"] = None
+    _PS_RAW["old"] = None
+
 def _ps_key():
     """
     Read one raw keypress from stdin.
-    Returns 'UP', 'DOWN', 'ENTER', 'ESC', or a single printable character.
+    Returns 'UP', 'DOWN', 'ENTER', 'ESC', 'MOUSE:col:row', 'HOVER:col:row',
+    or a single printable character.
     Works on Linux/macOS (termios) and Windows (msvcrt).
     """
     if HAVE_TERMIOS:
         import tty as _tty, termios as _termios, select as _sel
         fd = sys.stdin.fileno()
-        old = _termios.tcgetattr(fd)
+        # Reuse the menu-wide raw mode when it is active; only toggle raw
+        # mode ourselves when nobody else is holding it.
+        owns_raw = _PS_RAW["fd"] is None
+        old = None
         try:
-            _tty.setraw(fd)
+            if owns_raw:
+                old = _termios.tcgetattr(fd)
+                _tty.setraw(fd)
             ch = os.read(fd, 1).decode('utf-8', errors='ignore')
             if ch == '\x1b':
                 rdy, _, _ = _sel.select([fd], [], [], 0.08)
@@ -12189,6 +13149,25 @@ def _ps_key():
                             ch3 = os.read(fd, 1).decode('utf-8', errors='ignore')
                             if ch3 == 'A': return 'UP'
                             if ch3 == 'B': return 'DOWN'
+                            if ch3 == '<':
+                                # SGR mouse report: \033[<btn;col;rowM/m
+                                _seq = ''
+                                for _ in range(24):
+                                    _c = os.read(fd, 1).decode('utf-8', errors='ignore')
+                                    if not _c or _c in 'Mm':
+                                        _seq += _c
+                                        break
+                                    _seq += _c
+                                _m = re.match(r'(\d+);(\d+);(\d+)([Mm])', _seq)
+                                if _m:
+                                    _b = int(_m.group(1))
+                                    _cx = int(_m.group(2))
+                                    _cy = int(_m.group(3))
+                                    if _m.group(4) == 'M' and _b == 0:
+                                        return "MOUSE:%s:%s" % (_cx, _cy)
+                                    if _b >= 32:
+                                        return "HOVER:%s:%s" % (_cx, _cy)
+                                return None
                 return 'ESC'
             if ch in ('\r', '\n'):   return 'ENTER'
             if ch == '\x7f':         return 'BACKSPACE'
@@ -12196,7 +13175,9 @@ def _ps_key():
             if ch == '\x04':         raise EOFError
             return ch
         finally:
-            _termios.tcsetattr(fd, _termios.TCSANOW, old)
+            if owns_raw and old is not None:
+                _termios.tcsetattr(fd, _termios.TCSANOW, old)
+
     else:
         import msvcrt as _msvcrt
         ch = _msvcrt.getwch()
@@ -12302,21 +13283,20 @@ def _start_menu_music():
                 pygame.mixer.stop()
             except Exception:
                 pass
-        import pathlib
-        # Try dedicated menu track first, fall back to the forest ambience.
-        for fname in ("audiomass-output-_1_.ogg", "hayden-folker-adrift-_1_.ogg"):
-            path = pathlib.Path(__file__).parent / "assets" / fname
-            if path.exists():
-                snd = pygame.mixer.Sound(str(path))
-                try:
-                    snd.set_volume(0.55)
-                except Exception:
-                    pass
-                ch = pygame.mixer.find_channel(True)
-                if ch:
-                    ch.play(snd, loops=-1)
-                    _MENU_MUSIC.update({"chan": ch, "snd": snd, "playing": True})
-                return
+        # Dedicated menu track only — never fall back to the in-game ambience,
+        # otherwise the menu just plays "the normal music".
+        path = resolve_menu_track()
+        if path:
+            snd = pygame.mixer.Sound(str(path))
+            try:
+                snd.set_volume(0.55)
+            except Exception:
+                pass
+            ch = pygame.mixer.find_channel(True)
+            if ch:
+                ch.play(snd, loops=-1)
+                _MENU_MUSIC.update({"chan": ch, "snd": snd, "playing": True})
+            return
     except Exception:
         _MENU_MUSIC["playing"] = False
 
@@ -12328,6 +13308,51 @@ def _stop_menu_music():
     except Exception:
         pass
     _MENU_MUSIC.update({"chan": None, "snd": None, "playing": False})
+
+
+def _inventory_music_on():
+    """Start the inventory track (no-op without audio)."""
+    try:
+        snd = getattr(term, "sound", None) or globals().get("SOUND")
+        if snd is None:
+            pl = globals().get("player", None)
+            snd = getattr(pl, "sound", None)
+        if snd:
+            snd.start_inventory_bgm()
+    except Exception:
+        pass
+
+
+def _inventory_music_on_force():
+    """Force the inventory track to start even if the sound manager was not yet attached."""
+    try:
+        snd = globals().get("SOUND")
+        if snd is None:
+            snd = getattr(globals().get("term"), "sound", None)
+        if snd is None:
+            snd = getattr(globals().get("player"), "sound", None)
+        if snd is None:
+            return False
+        snd.start_inventory_bgm()
+        return True
+    except Exception:
+        return False
+
+
+def _inventory_music_off():
+    try:
+        snd = getattr(term, "sound", None) or globals().get("SOUND")
+        if snd is None:
+            pl = globals().get("player", None)
+            snd = getattr(pl, "sound", None)
+        if snd:
+            snd.stop_inventory_bgm()
+            try:
+                snd.start_ambient_bgm()
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 CREDITS_LINES = [
@@ -12351,6 +13376,9 @@ CREDITS_LINES = [
     "  \U0001F3B5 Forest ambience",
     "     \"Adrift\" composed by Hayden Folker",
     "     Licensed under Creative Commons Attribution 3.0 (CC BY 3.0).",
+    "",
+    "  \U0001F3B5 Main menu music and inventory music",
+    "     Mankind Unkind",
     "",
     "  \U0001F3B5 Arctic ambience",
     "     \"Flowing Into The Darkness\" by Nyoko",
@@ -12418,6 +13446,23 @@ def _prompt_debug_password():
     return False
 
 
+def _ps_mouse_on():
+    try:
+        # Match exactly what term.enable_mouse() enables so clicks and hover
+        # both work on the save-select screen the same as everywhere in-game.
+        sys.stdout.write("\033[?1000h\033[?1002h\033[?1003h\033[?1006h")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+def _ps_mouse_off():
+    try:
+        sys.stdout.write("\033[?1003l\033[?1002l\033[?1000l\033[?1006l")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 def pick_save():
     """
     Show the save-slot menu in normal (cooked) terminal mode.
@@ -12480,45 +13525,104 @@ def pick_save():
     dev_state = {"on": False}   # Dev Mode toggle (first menu option)
 
     def _show_save_page(page, buf=""):
-        sys.stdout.write("\033[2J\033[H")   # clear screen, go home
-        sys.stdout.flush()
+        """Render the menu.
+
+        Everything is buffered into a list first so we can (a) emit CRLF —
+        required while the terminal is held in raw mode for mouse clicks —
+        and (b) correct every click zone for screen scrolling when the menu
+        is taller than the window. Previously the rows were recorded as if
+        nothing scrolled, so clicks landed on the wrong line (or nowhere)."""
+        menu_zones_clear()
+        rows = []          # list of (text, action|None) — one entry per screen line
+        def _p(text="", action=None):
+            parts = str(text).split("\n")
+            for i, part in enumerate(parts):
+                rows.append((part, action if i == len(parts) - 1 else None))
         start = page * SAVE_PAGE_SIZE
         end   = min(start + SAVE_PAGE_SIZE, total_live)
-        print()
-        print("  " + "═" * 54)
-        print("  🪐  9 PLANETS — Beta")
-        print("  🎵 Battle music: Dragon Castle by Makai Symphony")
-        print("  " + "═" * 54)
+        _p()
+        _p("  " + "═" * 54)
+        _p("  🪐  9 PLANETS — Beta")
+        _p("  🎵 Battle music: Dragon Castle by Makai Symphony")
+        _p("  " + "═" * 54)
         _dev_lbl = "ON ✅" if dev_state["on"] else "OFF"
-        print(f"\n  🛠  Dev Mode: {_dev_lbl}   (type 'dev' to toggle)")
+        _p(f"\n  🛠  Dev Mode: {_dev_lbl}   (click or type 'dev' to toggle)", "DEV")
         if total_pages > 1:
-            print(f"\n  💾  YOUR SAVES  (page {page+1}/{total_pages})\n")
+            _p(f"\n  💾  YOUR SAVES  (page {page+1}/{total_pages})\n")
         else:
-            print(f"\n  💾  YOUR SAVES\n")
+            _p(f"\n  💾  YOUR SAVES\n")
         for i in range(start, end):
-            print(live_entries[i][3].replace("{i}", str(i+1)))
+            _p(live_entries[i][3].replace("{i}", str(i+1)), "IDX:%d" % (i + 1))
         if page == total_pages - 1 and dead_entries:
-            print("\n  📜  PAST GAMES\n")
+            _p("\n  📜  PAST GAMES\n")
             for line, _ in dead_entries:
-                print(line)
-        print(f"\n  {new_idx}. ✨  New Game")
-        print(f"  {new_idx + 1}. 📜  Credits")
-        print("  0.  ❌  Exit")
+                _p(line)
+        _p(f"\n  {new_idx}. ✨  New Game", "IDX:%d" % new_idx)
+        _p(f"  {new_idx + 1}. 📜  Credits", "IDX:%d" % (new_idx + 1))
+        _p("  0.  ❌  Exit", "IDX:0")
         if total_pages > 1:
-            print("  ↑/↓ arrow keys to flip pages   d<n> to delete")
+            _p("  ↑/↓ arrow keys to flip pages   d<n> to delete   🖱️ click to select")
         else:
-            print("  d<n> to delete a save (e.g. d1)")
-        sys.stdout.write(f"\n  Choose: {buf}")
+            _p("  d<n> to delete a save (e.g. d1)   🖱️ click to select")
+        _p("")
+        prompt = f"  Choose: {buf}"
+
+        try:
+            term_rows = os.get_terminal_size().lines
+        except Exception:
+            term_rows = 24
+        # Total screen lines used = rows + the prompt line.
+        used = len(rows) + 1
+        shift = max(0, used - term_rows)   # how many lines scrolled off the top
+
+        out = ["\033[2J\033[H"]
+        for idx, (text, action) in enumerate(rows):
+            out.append(text + "\r\n")
+            if action is not None:
+                screen_row = (idx + 1) - shift
+                if screen_row >= 1:
+                    menu_zone_add(screen_row, action)
+        out.append(prompt)
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
 
     if total_live or dead_entries:
+        _ps_mouse_on()
+        # Hold raw mode for the whole loop: in cooked mode the terminal buffers
+        # mouse escape sequences until Enter, which is why clicking the main
+        # menu did nothing while it worked on every in-game screen.
+        _ps_raw_on()
         _show_save_page(0)
         buf = ""          # typed characters accumulate here
         while True:
             try:
                 k = _ps_key()
             except (EOFError, KeyboardInterrupt):
-                sys.exit(0)
+                _ps_mouse_off(); _ps_raw_off(); sys.exit(0)
+
+            if isinstance(k, str) and k.startswith("HOVER:"):
+                # Hover events should not be treated as text input and should not
+                # break the menu loop. They are currently ignored here, which makes
+                # the save screen feel unresponsive for tooltips even when the
+                # parser is producing valid hover tokens.
+                continue
+            if k is None:
+                continue
+
+            if isinstance(k, str) and k.startswith("MOUSE:"):
+                _act = menu_click_action(k)
+                if not _act:
+                    continue
+                if _act == "DEV":
+                    dev_state["on"] = not dev_state["on"]
+                    buf = ""
+                    _show_save_page(current_page, buf)
+                    continue
+                if _act.startswith("IDX:"):
+                    buf = _act[4:]
+                    k = 'ENTER'
+                else:
+                    continue
 
             if k == 'UP':
                 if current_page > 0:
@@ -12540,10 +13644,10 @@ def pick_save():
             if k == 'ENTER':
                 raw = buf.strip()
                 buf = ""
-                sys.stdout.write("\n")
+                sys.stdout.write("\r\n")
                 sys.stdout.flush()
                 if raw == "0":
-                    sys.exit(0)
+                    _ps_mouse_off(); _ps_raw_off(); sys.exit(0)
                 # Dev Mode toggle (first option)
                 if raw.lower() == "dev":
                     dev_state["on"] = not dev_state["on"]
@@ -12563,6 +13667,8 @@ def pick_save():
                                 ck = _ps_key()
                                 if ck == 'ENTER':
                                     break
+                                if isinstance(ck, str) and (ck.startswith("HOVER:") or ck.startswith("MOUSE:")):
+                                    continue
                                 if ck == 'BACKSPACE':
                                     confirm_buf = confirm_buf[:-1]
                                 elif ck and ck.isprintable():
@@ -12570,11 +13676,12 @@ def pick_save():
                                     sys.stdout.write(ck); sys.stdout.flush()
                             if confirm_buf.strip().lower() in ("y","yes"):
                                 ok, m = delete_save(sname)
-                                sys.stdout.write(f"\n  {m}\n"); sys.stdout.flush()
+                                sys.stdout.write(f"\r\n  {m}\r\n"); sys.stdout.flush()
                                 if ok:
+                                    _ps_mouse_off(); _ps_raw_off()
                                     return pick_save()
                             else:
-                                sys.stdout.write("\n  Deletion cancelled.\n"); sys.stdout.flush()
+                                sys.stdout.write("\r\n  Deletion cancelled.\r\n"); sys.stdout.flush()
                     except (ValueError, IndexError):
                         pass
                     _show_save_page(current_page, "")
@@ -12584,18 +13691,22 @@ def pick_save():
                     idx = int(raw)
                     if 1 <= idx <= total_live:
                         path, biome, save_debug, _, _ = live_entries[idx - 1]
+                        _ps_mouse_off(); _ps_raw_off()
                         return path, biome, False, None, False, 1.0, True, dev_state["on"], False, save_debug, "dark", False, False
                     if idx == new_idx:
                         break
                     if idx == new_idx + 1:
+                        _ps_mouse_off(); _ps_raw_off()
                         show_credits_screen()
+                        _ps_mouse_on(); _ps_raw_on()
                         _show_save_page(current_page, "")
                         continue
                 if raw:
-                    sys.stdout.write("  ⚠️  Invalid choice.\n"); sys.stdout.flush()
+                    sys.stdout.write("  ⚠️  Invalid choice.\r\n"); sys.stdout.flush()
                     time.sleep(0.6)
                 _show_save_page(current_page, "")
                 continue
+
             # Printable character — echo and accumulate
             if k and k.isprintable():
                 buf += k
@@ -12623,6 +13734,8 @@ def pick_save():
             break
 
     # ---- New Game flow ----
+    _ps_mouse_off(); _ps_raw_off()
+
     print("\n  ✨  NEW GAME\n")
     while True:
         try:
@@ -13425,6 +14538,12 @@ def main():
 
         update_quests(player, weather, world, msg, term)
 
+        # Enable mouse click reporting so clicks on map/scan tiles trigger click-to-walk.
+        try:
+            term.enable_mouse()
+        except Exception:
+            pass
+
         def _exit_handler(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGINT, _exit_handler)
@@ -14028,6 +15147,7 @@ def main():
                     last_auto_save = now
                     try:
                         do_save(player, world, save_path, biome, paused=False)
+                        msg.append("💾 Auto-saved."); msg = msg[-3:]
                     except Exception as e:
                         msg.append(f"⚠️ Auto-save failed: {e}"); msg = msg[-3:]
             else:
@@ -14084,6 +15204,20 @@ def main():
                         qt_on_event(term, player, world, "arrived_walk")
 
             key = term.get_key() if not step_msg else None
+            # ── Mouse clicks on the command sidebar ───────────────────────
+            if isinstance(key, str) and key.startswith("MOUSE:"):
+                _hz = hud_click_action(key)
+                if _hz and _hz.startswith("CMD:"):
+                    _res = sidebar_cmd_click(_hz[4:])
+                    key = None
+                    if _res and _res[0] == "run":
+                        _QUEUED_CMDS.append(_res[1])
+                    elif _res and _res[0] == "type":
+                        buf = _res[1]; rn = True
+            # ── Commands queued by clicks (sidebar / recipe pages) ────────
+            if key is None and _QUEUED_CMDS:
+                buf = _QUEUED_CMDS.pop(0)
+                key = '\r'
             if player.auto_walk_target and key is not None:
                 player.auto_walk_target = None
             if player.in_combat and player.auto_walk_target:
@@ -14131,6 +15265,76 @@ def main():
                         if _nearby_h and not player.inside_house_id:
                             msg.append(f"🏠 You're inside a {_nearby_h['type'].replace('_',' ')} footprint. Type 'enter' to go inside.")
                         msg = msg[-3:]; rn = True; time.sleep(0.05)
+
+            elif key and isinstance(key, str) and key.startswith("HOVER:"):
+                # Mouse moved — update / draw the floating tooltip in place.
+                if tooltip_hover(key):
+                    rn = True
+                continue
+
+            elif key and isinstance(key, str) and key.startswith("MOUSE:"):
+
+                # Click-to-walk: convert terminal click → world tile and auto-walk.
+                try:
+                    _, _scx_s, _scy_s = key.split(":")
+                    _scx, _scy = int(_scx_s), int(_scy_s)
+                    _tx, _ty = None, None
+                    if getattr(player, "graphics_mode", False):
+                        # Graphics mode: cell (gi,gj) painted at ANSI row gj+2, col 2+gi*2
+                        _ox  = getattr(player, "_gm_ox",     None)
+                        _oy  = getattr(player, "_gm_oy",     None)
+                        _mw  = getattr(player, "_gm_tile_w", 20)
+                        _mh  = getattr(player, "_gm_tile_h", 20)
+                        if _ox is not None:
+                            _gi = (_scx - 2) // 2
+                            _gj = _scy - 2
+                            if 0 <= _gi < _mw and 0 <= _gj < _mh:
+                                _tx = _gi + _ox
+                                _ty = _gj + _oy
+                    else:
+                        # Standard mode: look up clicked terminal row in coord map.
+                        # Write a small debug file so row-offset issues are diagnosable.
+                        _cm2 = getattr(player, "_std_click_row_map", {})
+                        try:
+                            import tempfile as _tf, os as _os
+                            _dbg_path = _os.path.join(_tf.gettempdir(), "9p_click.txt")
+                            with open(_dbg_path, "a") as _dbf:
+                                _dbf.write(
+                                    f"click col={_scx} row={_scy} "
+                                    f"map_rows={sorted(_cm2.keys())[:8]}\n"
+                                )
+                        except Exception:
+                            pass
+                        if _scy in _cm2:
+                            _tx, _ty = _cm2[_scy]
+                        elif _cm2:
+                            # Tolerance ±3 rows — header-count variations can shift rows
+                            # by a line or two (e.g. stat-bar wrap, terminal-width changes).
+                            for _off in range(1, 4):
+                                if (_scy - _off) in _cm2:
+                                    _tx, _ty = _cm2[_scy - _off]; break
+                                if (_scy + _off) in _cm2:
+                                    _tx, _ty = _cm2[_scy + _off]; break
+                    if _tx is not None and _ty is not None:
+                        if paused:
+                            msg.append("⏸️ Unpause first to walk there."); msg = msg[-3:]
+                        elif player.in_combat:
+                            msg.append("⚔️ Can't walk while in combat."); msg = msg[-3:]
+                        elif player.resting:
+                            msg.append("😴 Type 'rest' to stop resting first."); msg = msg[-3:]
+                        elif player.active_tasks:
+                            msg.append("🔨 Finish crafting before walking there."); msg = msg[-3:]
+                        elif getattr(player, "gather_all", None):
+                            msg.append("⏳ Finish gather-all before walking there."); msg = msg[-3:]
+                        elif player.fatigue <= 0:
+                            msg.append("😴 Too exhausted to walk."); msg = msg[-3:]
+                        elif int(player.x) == _tx and int(player.y) == _ty:
+                            msg.append("📍 Already here."); msg = msg[-3:]
+                        else:
+                            player.start_auto_walk(_tx, _ty, world, msg)
+                            rn = True
+                except Exception:
+                    pass
 
             elif key in ('\r','\n'):
                 cmd = buf.strip().lower(); buf = ""; rn = True
@@ -14219,14 +15423,16 @@ def main():
                     _total_sub     = 1
                     while True:
                         ch = term.get_key_no_flush(0.5)
+                        if isinstance(ch, str) and ch.startswith("MOUSE:"):
+                            ch = menu_click_action(ch)
                         if ch is None:
                             continue
                         if _cur_page_key is None:
                             # TOC mode
                             if ch in ('\r', '\n', '0', 'ESC', 'q', 'Q'):
                                 sys.stdout.write("\033[2J"); sys.stdout.flush(); break
-                            if ch and ch.isdigit():
-                                idx = int(ch)
+                            idx = menu_choice(ch)
+                            if idx is not None:
                                 if 1 <= idx <= len(page_keys):
                                     _cur_page_key = page_keys[idx - 1]
                                     _cur_sub_page = 0
@@ -14390,13 +15596,20 @@ def main():
 
                 # ---- INVENTORY ----
                 elif act in ("inv","inventory"):
+                    _inventory_music_on_force()
                     out = ["🎒 INVENTORY", "─"*TERM_WIDTH, ""]
-                    # Collect regular inventory items for grid layout
-                    items_grid = []
+                    # Collect regular inventory items for grid layout.
+                    # Also keep the raw item keys so we can register tooltips.
+                    items_grid = []       # (display_name, qty_str)
+                    items_keys = []       # parallel list of item keys
                     for k,v in sorted(player.inventory.items()):
                         if k.startswith("unknown_"): continue
                         if isinstance(v,int) and v > 0:
                             items_grid.append((display_item_name(k), str(v)))
+                            items_keys.append((k, v))
+
+                    # tooltip_zones maps out-line-index -> [(col_start, col_end, tip)]
+                    _inv_tip_zones = {}   # line_index -> list of (c0, c1, text)
 
                     # Layout items in grid columns. Use visual-width helpers so emoji
                     # don't break alignment, and add generous gutters between columns.
@@ -14419,14 +15632,30 @@ def main():
                         # pages. Hard cap at 4 columns so spacing stays huge.
                         cols_per_row = max(1, min(4, (available_width + SEP_W) // (col_width + SEP_W)))
                         for i in range(0, len(items_grid), cols_per_row):
-                            row_items = items_grid[i:i+cols_per_row]
+                            row_items  = items_grid[i:i+cols_per_row]
+                            row_keys   = items_keys[i:i+cols_per_row]
                             cells = []
-                            for name, qty in row_items:
+                            cell_c0 = []  # left column edge of each cell (visual, 0-indexed)
+                            cur_col = 2   # "  " indent
+                            for idx, (name, qty) in enumerate(row_items):
+                                cell_c0.append(cur_col)
                                 item_str = f"{name}: {qty}"
                                 pad = col_width - vlen(item_str)
                                 if pad < 0: pad = 0
                                 cells.append(item_str + (" " * pad))
+                                cur_col += col_width + SEP_W
+                            line_idx = len(out)
                             out.append("  " + SEP.join(cells).rstrip())
+                            # Register a tooltip zone for each item in this grid row
+                            tips_for_line = []
+                            for idx, (ik, iqty) in enumerate(row_keys):
+                                tip = item_tooltip_text(ik, iqty)
+                                if tip:
+                                    c0 = cell_c0[idx]
+                                    c1 = c0 + col_width - 1
+                                    tips_for_line.append((c0, c1, tip))
+                            if tips_for_line:
+                                _inv_tip_zones[line_idx] = tips_for_line
                         out.append("")
 
                     # Unknown items (unchanged)
@@ -14488,13 +15717,26 @@ def main():
                     except Exception:
                         _rows_term = 30
                     LINES_PER_PAGE = max(12, min(40, _rows_term - 8))
+
+                    def _register_inv_tips(page_lines, page_offset=0):
+                        """Register per-item hover tooltip zones for this page."""
+                        tip_zones_clear()
+                        for _li, _zones in _inv_tip_zones.items():
+                            _row = _li - page_offset + 1   # 1-indexed terminal row
+                            if 1 <= _row <= len(page_lines) + 2:
+                                for _c0, _c1, _tip in _zones:
+                                    tip_zone_add(_row, _c0, _c1, _tip)
+
                     if len(out) <= LINES_PER_PAGE:
+                        _register_inv_tips(out)
                         term.print_page(out)
                     else:
                         pages = [out[i:i+LINES_PER_PAGE] for i in range(0, len(out), LINES_PER_PAGE)]
                         for pi, page in enumerate(pages):
                             page_hdr = [f"🎒 INVENTORY — page {pi+1}/{len(pages)}"] if pi > 0 else []
+                            _register_inv_tips(page, page_offset=pi * LINES_PER_PAGE - len(page_hdr))
                             term.print_page(page_hdr + page)
+                    _inventory_music_off()
 
                 # ---- EXPLAIN ----
                 elif act == "explain" and arg:
@@ -14592,13 +15834,17 @@ def main():
                     term.show_menu(["📜 RECIPES", "─"*TERM_WIDTH] + [f"  {k}" for k in cat_keys] + ["","  Press number. Enter to close."])
                     while True:
                         ch = term.get_key_no_flush(0.5)
+                        if isinstance(ch, str) and ch.startswith("MOUSE:"):
+                            ch = menu_click_action(ch) or ""
                         if ch in ('\r','\n','ESC'):
                             sys.stdout.write("\033[2J"); sys.stdout.flush(); break
-                        if ch and ch.isdigit():
-                            idx = int(ch)
+                        idx = menu_choice(ch)
+                        if idx is not None:
                             if 1 <= idx <= len(cat_keys):
                                 cn = cat_keys[idx-1]
                                 out = [f"🔨 {cn.split('. ')[1]} Recipes", "─"*TERM_WIDTH]
+                                _rzones = {}
+                                _recipe_tip_zones = {}
                                 for n in cats[cn]:
                                     r = RECIPES.get(n,{})
                                     # Show any_berry as "any berry" in display
@@ -14618,8 +15864,23 @@ def main():
                                         out.append("  Name                      | Materials                                     | Station               | Fuel")
                                         out.append("  " + "-" * 24 + "+" + "-" * 45 + "+" + "-" * 22 + "+------")
                                     fuel_s = f"{fuel}🪵" if fuel is not None else ""
+                                    row_idx = len(out)
+                                    _rzones[row_idx] = "CMD:craft " + n
+                                    tip_text = recipe_tooltip_text(n, r)
+                                    if tip_text:
+                                        _recipe_tip_zones[row_idx] = [(2, 80, tip_text)]
                                     out.append(f"  {name:<24}| {mats:<45}| {st:<22}| {fuel_s}")
-                                term.print_page(out); break
+                                out.append("")
+                                out.append("  🖱️  Click a recipe to start crafting it.")
+                                # Register recipe-row hover tooltips before the page is rendered.
+                                tip_zones_clear()
+                                for _rrow, _tips in _recipe_tip_zones.items():
+                                    for _c0, _c1, _tip in _tips:
+                                        tip_zone_add(_rrow, _c0, _c1, _tip)
+                                _clk = term.print_page(out, zones=_rzones)
+                                if isinstance(_clk, str) and _clk.startswith("CMD:"):
+                                    _QUEUED_CMDS.append(_clk[4:])
+                                break
                     rn = True
 
                 # ---- SHOP (categorized) ----
@@ -14628,10 +15889,12 @@ def main():
                     term.show_menu(["🏪 SHOP", "─"*TERM_WIDTH] + [f"  {k}" for k in cat_keys] + ["","  Press number. Enter to close."])
                     while True:
                         ch = term.get_key_no_flush(0.5)
+                        if isinstance(ch, str) and ch.startswith("MOUSE:"):
+                            ch = menu_click_action(ch) or ""
                         if ch in ('\r','\n','ESC'):
                             sys.stdout.write("\033[2J"); sys.stdout.flush(); break
-                        if ch and ch.isdigit():
-                            idx = int(ch)
+                        idx = menu_choice(ch)
+                        if idx is not None:
                             if 1 <= idx <= len(cat_keys):
                                 cn = cat_keys[idx-1]
                                 out = [f"🏪 {cn.split('. ')[1]}", "─"*TERM_WIDTH, "  Name                       | Buy 🪙 | Sell 🪙"]
@@ -16161,6 +17424,8 @@ def main():
     except KeyboardInterrupt: print("\n⚠️ Interrupted")
     except Exception as e:
         crashed = True
+        try: term.disable_mouse()
+        except Exception: pass
         try: term.cleanup()
         except Exception: pass
         print(f"\n⚠️ Error: {e}")
@@ -16168,6 +17433,8 @@ def main():
         try: input("\nTraceback shown above. Press Enter to close...")
         except Exception: pass
     finally:
+        try: term.disable_mouse()
+        except Exception: pass
         if not crashed:
             term.cleanup()
         if save_path:

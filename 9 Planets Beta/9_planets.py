@@ -391,6 +391,16 @@ STAT_TOOLTIPS = [
     ("🔥",  "You are on fire! Step into water or you keep taking damage."),
     ("☣️",  "Active diseases and how many stacks of each you have."),
     ("🪤",  "Traps you have placed: ⏳ still setting, 🟢 something is caught."),
+    ("🍖",  "Hunger — drains over time. At 0 you lose 10 HP immediately, then every 30 seconds."),
+    ("💰",  "Coins — spend them in the shop, earn them by selling and completing quests."),
+    ("😊",  "Temperature — Comfy: your clothing/shelter matches this area's requirement."),
+    ("❄️",  "Temperature — Cold. Get insulation or a campfire before it starts hurting you."),
+    ("🥶",  "Temperature — Freezing! You are losing HP. Warm up right now."),
+    ("🧥",  "Temperature — Cool. Fine for now, but colder ground is ahead."),
+    ("🔆",  "Temperature — Hot. Drink water and shed heavy clothing."),
+    ("🥵",  "Temperature — Burning! Heatstroke damage. Find water or shade."),
+    ("🌡",  "Body temperature — hypothermia below the safe band, heatstroke above it."),
+    ("🏭",  "Crafting station — its GWM durability. Repair it before it breaks."),
 ]
 
 
@@ -619,25 +629,31 @@ def _build_commands_sidebar(width, height):
     return (lines[:height], cells)
 
 
+def _icon_norm(s):
+    """Drop variation selectors / ZWJ so \ufe0f mismatches never break matching."""
+    return "".join(ch for ch in str(s) if ch not in ("\ufe0f", "\ufe0e", "\u200d"))
+
+
 def register_stat_tooltips(header_lines, row0=1, col0=0):
-    """Register hover tooltips for every stat token in the HUD header rows."""
+    """Register hover tooltips for every stat token in the HUD header rows.
+
+    Segments are split on '|' AND on runs of two or more spaces, so both the
+    standard-mode header ("a | b | c") and the graphics-mode side panel
+    ("  ❤️ 90  🍖 40  💧 55") get one hover zone per stat."""
     try:
         for i, line in enumerate(header_lines):
             txt = re.sub(r"\033\[[0-9;?]*[ -/]*[@-~]", "", str(line))
             row = row0 + i
-            pos = 0
-            for seg in txt.split("|"):
-                c0 = col0 + vlen(txt[:pos]) + 1
-                c1 = c0 + max(0, vlen(seg) - 1)
-                pos += len(seg) + 1
-                tip = None
-                for icon, desc in STAT_TOOLTIPS:
-                    if icon in seg:
-                        tip = desc
-                        break
-                if tip:
-                    tip_zone_add(row, c0, c1, tip)
-
+            for m in re.finditer(r"[^|]+", txt):
+                for sm in re.finditer(r"\S(?:.*?\S)?(?=\s{2,}|$)", m.group(0)):
+                    start = m.start() + sm.start()
+                    seg = sm.group(0)
+                    c0 = col0 + vlen(txt[:start]) + 1
+                    c1 = c0 + max(0, vlen(seg) - 1)
+                    seg_n = _icon_norm(seg)
+                    tip = next((d for ic, d in STAT_TOOLTIPS if _icon_norm(ic) and _icon_norm(ic) in seg_n), None)
+                    if tip:
+                        tip_zone_add(row, c0, c1, tip)
     except Exception:
         pass
 
@@ -3922,6 +3938,22 @@ def recipe_tooltip_text(recipe_key, recipe_def=None):
         lines.append(f"⚡ Energy: {recipe_def.get('energy', 0)}")
     if recipe_def.get("fuel") is not None:
         lines.append(f"🪵 Fuel: {recipe_def.get('fuel')}" )
+    # Food / drink stats of the crafted result
+    try:
+        fe = food_effects.get(recipe_key)
+        if fe:
+            lines.append("🍽️ Restores:")
+            for stat, icon, label in [("health","❤️","Health"), ("hunger","🍖","Food"),
+                                      ("energy","⚡","Energy"), ("fatigue","😴","Fatigue"),
+                                      ("thirst","💧","Thirst")]:
+                if fe.get(stat):
+                    lines.append(f"   {icon} {label} {fe[stat]:+d}")
+            if fe.get("notes"):
+                lines.append(f"   {fe['notes']}")
+            if fe.get("risk_min"):
+                lines.append(f"   ⚠️ Risk {int(fe['risk_min']*100)}-{int(fe['risk_max']*100)}% for {fe.get('risk_dmg',0)} dmg")
+    except Exception:
+        pass
     return "\n".join(lines)
 
 
@@ -3987,7 +4019,146 @@ def item_tooltip_text(item_key, qty=None):
             lines.append(f"🪙 Sell: {price}  Buy: {int(price*1.5)}")
     except Exception: pass
 
-    return "\n".join(lines) if len(lines) > 2 else ""
+    # --- Fall back to the full 'explain' text so EVERY item has a tooltip ---
+    if len(lines) <= 2:
+        try:
+            body = build_explain_lines(item_key)
+        except Exception:
+            body = []
+        body = [b for b in body[2:] if str(b).strip()]
+        if body:
+            lines.extend(body)
+    if len(lines) <= 2:
+        lines.append("No extra details known for this item yet.")
+        lines.append("Try: inspect / explain it in game.")
+    return "\n".join(lines)
+
+
+def build_explain_lines(target, player=None, width=None):
+    """Full 'explain <x>' text as a list of lines. Shared by the explain
+    command and by every hover tooltip so they always match."""
+    width = width or TERM_WIDTH
+    target = str(target).lower().strip()
+    try:
+        km = target if target in GAME_MECHANICS else next(
+            (k for k in GAME_MECHANICS if target in k or k in target), None)
+    except Exception:
+        km = None
+    if km:
+        return [f"📘 {km.replace('_',' ').title()}", "─" * width, GAME_MECHANICS[km]]
+
+    tk = target.replace(" ", "_")
+    try:
+        if tk in GATHER_ALIASES:  tk = GATHER_ALIASES[tk]
+        if tk in CONSUME_ALIASES: tk = CONSUME_ALIASES[tk]
+    except Exception:
+        pass
+
+    out = [f"📘 {display_item_name(tk)}", "─" * width]
+
+    # Craftable?
+    recipe = RECIPES.get(tk)
+    if recipe:
+        out.append("🔨 RECIPE:")
+        mat_parts = []
+        for k_m, v_m in recipe.get("mat", {}).items():
+            label = "any berry" if k_m == "any_berry" else k_m.replace("_", " ")
+            mat_parts.append(f"{v_m} {label}")
+        out.append(f"  Materials: {', '.join(mat_parts) or '—'}")
+        st = recipe.get("station", "—") or "—"
+        if isinstance(st, list): st = " + ".join(s.replace("_", " ") for s in st)
+        elif st != "—": st = st.replace("_", " ")
+        out.append(f"  Station: {st}")
+        out.append(f"  Time: {recipe.get('igm',0)}s, Energy: {recipe.get('energy',0)}⚡")
+        consumed_in = [f"{r.replace('_',' ').title()} ({i['mat'][tk]})"
+                       for r, i in RECIPES.items() if tk in i.get("mat", {})]
+        if consumed_in:
+            out.append(f"  Used in: {', '.join(consumed_in)}")
+        out.append("")
+
+    # Findable?
+    found_in = []
+    for biome in ("Forest", "Arctic"):
+        for res_name, res_meta in (BIOME_RESOURCES.get(biome, {}) or {}).items():
+            if res_meta.get("item") == tk:
+                found_in.append(f"  {res_name} (🕐 {biome})")
+    if found_in:
+        out.append("📍 FOUND IN:")
+        out.extend(found_in)
+        out.append("")
+
+    # Food effects
+    eff = food_effects.get(tk)
+    if eff:
+        out.append("⚙️ FOOD EFFECTS:")
+        stats = []
+        for stat, icon in [("energy","⚡"),("hunger","🍽️"),("health","❤️"),("thirst","💧"),("fatigue","😴")]:
+            if eff.get(stat): stats.append(f"{icon}{eff[stat]}")
+        if stats: out.append(f"  Stats: {', '.join(stats)}")
+        if eff.get("notes"): out.append(f"  Note: {eff['notes']}")
+        if eff.get("risk_min"):
+            out.append(f"  ⚠️ Risk: {int(eff['risk_min']*100)}-{int(eff['risk_max']*100)}% for {eff.get('risk_dmg',0)} dmg")
+        elif eff.get("risk") == "unknown": out.append("  ❓ UNKNOWN RISK")
+        elif eff.get("risk") == "mystery_mushroom": out.append("  ❓ MYSTERY: Random effects each time!")
+        elif eff.get("risk") == "mystery_moss": out.append("  ❓ MYSTERY MOSS: 50% heal or damage!")
+        out.append("")
+    else:
+        try:
+            out.append(f"🔍 ID chance per attempt: {int(IDENTIFY_CHANCES.get(tk,0.0)*100)}%")
+        except Exception:
+            pass
+        out.append("")
+
+    # Weapon / armor / station extras
+    try:
+        sd = SPEAR_DEFS.get(tk, {})
+        if sd:
+            out.append("🗡️ WEAPON:")
+            if sd.get("throw"):  out.append(f"  Throw damage: {sd['throw']}")
+            if sd.get("strike"): out.append(f"  Strike damage: {sd['strike']}")
+            if sd.get("dur"):    out.append(f"  Durability: {sd['dur']}")
+            out.append("")
+    except Exception: pass
+    armor_info = {"light_armor": (20, 500), "medium_armor": (40, 1000), "heavy_armor": (70, 1800)}
+    if tk in armor_info:
+        pct, dur = armor_info[tk]
+        out.append("🛡️ ARMOR:")
+        out.append(f"  Damage reduction: {pct}%   Durability: {dur}")
+        out.append("")
+    try:
+        ins = CLOTHING_INSULATION.get(tk)
+        if ins:
+            out.append(f"🧊 Insulation: +{ins}")
+            out.append("")
+    except Exception: pass
+    try:
+        if tk in ("woodworking_station","furnace","water_filter","sewing_station","smelter","liquifier"):
+            out.append("🏭 STATION:")
+            out.append(f"  Place it, then craft at it. Max HP {int(STATION_MAX_HP)} GWM.")
+            out.append("  Repair it before it breaks; weather can damage stations.")
+            out.append("")
+    except Exception: pass
+
+    # Diseases
+    try:
+        diseases = getattr(player, "diseases", None) or {}
+        if diseases:
+            cures = [f"  {DISEASE_DISPLAY[d]}: {DISEASES.get(d,{}).get('recover',{})[tk]*100:.0f}% cure chance"
+                     for d in diseases if tk in DISEASES.get(d, {}).get("recover", {})]
+            if cures:
+                out.append("🩺 DISEASES:")
+                out.extend(cures)
+                out.append("")
+    except Exception: pass
+
+    price = ITEM_PRICES.get(tk)
+    if price:
+        out.append("🏪 SHOP:")
+        out.append(f"  Buy: {int(price*1.5)}🪙 | Sell: {price}🪙")
+    else:
+        out.append("🏪 Not sold in shop.")
+    return out
+
 
 
 # ==================== GAME DATA ====================
@@ -5404,6 +5575,9 @@ class Terminal:
                 # dwEventFlags 0 == button press/release; left button == bit 0
                 if me.dwEventFlags == 0 and (me.dwButtonState & 0x0001):
                     return "MOUSE:%d:%d" % (me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1)
+                # 0x0001 == MOUSE_MOVED -> hover (this is what drives tooltips)
+                if me.dwEventFlags & 0x0001:
+                    return "HOVER:%d:%d" % (me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1)
                 continue
             if time.time() >= deadline:
                 return None
@@ -6015,8 +6189,6 @@ class Terminal:
         optional.append(" " * right_w)
         optional.extend(_msg_rows)
 
-        register_stat_tooltips(essential, row0=1, col0=panel_c0)
-
         # Compose top with priority: essential always, optional truncated
         # from the end if it won't fit alongside bottom (2 rows) + cmd panel.
         # Reserve at least 2 rows for bottom (tile info + prompt).
@@ -6153,6 +6325,8 @@ class Terminal:
 
         # ── Clickable command rows (right panel) ──────────────────────────
         hud_zones_clear()
+        tip_zones_clear()
+        register_stat_tooltips(essential, row0=1, col0=panel_c0)
         try:
             _zcol0 = panel_c0   # left panel + " │ "
             for _ci, _rawc in (locals().get("_cmd_row_tokens") or {}).items():
@@ -6206,6 +6380,8 @@ class Terminal:
         cursor_col  = max(1, min(cols, cursor_col))
         sys.stdout.write(f"\033[{prompt_row};{cursor_col}H\033[?25h")
         sys.stdout.flush()
+        # Floating hover tooltip on top of everything (graphics mode).
+        draw_tooltip()
 
     def render_main(self, header, scan, msg, prompt, buf, player=None, paused=False):
         # Graphics Mode: completely bypass the normal renderer.
@@ -13090,6 +13266,136 @@ def delete_save(save_name):
 
 _PS_RAW = {"fd": None, "old": None}
 
+# ──────────────── Windows console mouse for the main menu ────────────────
+# msvcrt cannot see mouse events, so on Windows the main menu reads raw
+# INPUT_RECORDs (keys + clicks + moves) straight from the console API. This is
+# the same mechanism the in-game Terminal uses, which is why clicking worked
+# in-game but not on the menu.
+_PS_WIN = {"h": None, "k32": None, "old_mode": None, "mouse": False}
+
+
+def _ps_win_console_on(mouse=True):
+    if HAVE_TERMIOS:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        h = k32.GetStdHandle(-10)
+        if not h or h == wintypes.HANDLE(-1).value:
+            return False
+        old = wintypes.DWORD()
+        if not k32.GetConsoleMode(h, ctypes.byref(old)):
+            return False
+        if _PS_WIN["old_mode"] is None:
+            _PS_WIN["old_mode"] = old.value
+        ENABLE_MOUSE_INPUT = 0x0010
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        ENABLE_QUICK_EDIT = 0x0040
+        ENABLE_LINE_INPUT = 0x0002
+        ENABLE_ECHO_INPUT = 0x0004
+        ENABLE_PROCESSED_INPUT = 0x0001
+        mode = old.value
+        mode &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_QUICK_EDIT | ENABLE_PROCESSED_INPUT)
+        mode |= ENABLE_EXTENDED_FLAGS
+        if mouse:
+            mode |= ENABLE_MOUSE_INPUT
+        if not k32.SetConsoleMode(h, mode):
+            return False
+        _PS_WIN.update({"h": h, "k32": k32, "mouse": bool(mouse)})
+        return True
+    except Exception:
+        return False
+
+
+def _ps_win_console_off():
+    try:
+        if _PS_WIN["old_mode"] is not None and _PS_WIN["k32"] and _PS_WIN["h"]:
+            _PS_WIN["k32"].SetConsoleMode(_PS_WIN["h"], _PS_WIN["old_mode"])
+    except Exception:
+        pass
+    _PS_WIN.update({"h": None, "k32": None, "old_mode": None, "mouse": False})
+
+
+def _ps_win_read(timeout=0.25):
+    """Blocking-ish read of one console event on Windows.
+    Returns 'UP'/'DOWN'/'ENTER'/'BACKSPACE'/'MOUSE:c:r'/'HOVER:c:r'/char/None."""
+    k32 = _PS_WIN.get("k32")
+    h = _PS_WIN.get("h")
+    if not k32 or not h:
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class _COORD(ctypes.Structure):
+        _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+    class _CHAR(ctypes.Union):
+        _fields_ = [("UnicodeChar", ctypes.c_wchar), ("AsciiChar", ctypes.c_char)]
+
+    class _KEY(ctypes.Structure):
+        _fields_ = [("bKeyDown", wintypes.BOOL),
+                    ("wRepeatCount", ctypes.c_ushort),
+                    ("wVirtualKeyCode", ctypes.c_ushort),
+                    ("wVirtualScanCode", ctypes.c_ushort),
+                    ("uChar", _CHAR),
+                    ("dwControlKeyState", wintypes.DWORD)]
+
+    class _MOUSE(ctypes.Structure):
+        _fields_ = [("dwMousePosition", _COORD),
+                    ("dwButtonState", wintypes.DWORD),
+                    ("dwControlKeyState", wintypes.DWORD),
+                    ("dwEventFlags", wintypes.DWORD)]
+
+    class _EVENT(ctypes.Union):
+        _fields_ = [("KeyEvent", _KEY), ("MouseEvent", _MOUSE),
+                    ("pad", ctypes.c_byte * 32)]
+
+    class _RECORD(ctypes.Structure):
+        _fields_ = [("EventType", ctypes.c_ushort), ("Event", _EVENT)]
+
+    rec = _RECORD()
+    nread = wintypes.DWORD()
+    navail = wintypes.DWORD()
+    vk_map = {0x26: 'UP', 0x28: 'DOWN', 0x25: 'LEFT', 0x27: 'RIGHT'}
+    deadline = time.time() + max(0.0, timeout)
+    while True:
+        try:
+            if not k32.GetNumberOfConsoleInputEvents(h, ctypes.byref(navail)) or navail.value == 0:
+                if time.time() >= deadline:
+                    return None
+                time.sleep(0.005)
+                continue
+            if not k32.ReadConsoleInputW(h, ctypes.byref(rec), 1, ctypes.byref(nread)) or nread.value == 0:
+                return None
+        except Exception:
+            return None
+        if rec.EventType == 0x0001:      # KEY_EVENT
+            ke = rec.Event.KeyEvent
+            if not ke.bKeyDown:
+                continue
+            if ke.wVirtualKeyCode in vk_map:
+                return vk_map[ke.wVirtualKeyCode]
+            ch = ke.uChar.UnicodeChar
+            if not ch or ch == '\x00':
+                continue
+            if ch in ('\r', '\n'):
+                return 'ENTER'
+            if ch == '\x08':
+                return 'BACKSPACE'
+            if ch == '\x03':
+                raise KeyboardInterrupt
+            return ch
+        if rec.EventType == 0x0002 and _PS_WIN.get("mouse"):   # MOUSE_EVENT
+            me = rec.Event.MouseEvent
+            if me.dwEventFlags == 0 and (me.dwButtonState & 0x0001):
+                return "MOUSE:%d:%d" % (me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1)
+            if me.dwEventFlags & 0x0001:
+                return "HOVER:%d:%d" % (me.dwMousePosition.X + 1, me.dwMousePosition.Y + 1)
+            continue
+        if time.time() >= deadline:
+            return None
+
 def _ps_raw_on():
     """Put the terminal in raw mode for the whole menu loop.
 
@@ -13179,6 +13485,13 @@ def _ps_key():
                 _termios.tcsetattr(fd, _termios.TCSANOW, old)
 
     else:
+        # Console-API path (supports clicks + hover). Loop so the caller still
+        # gets a *blocking* read even though _ps_win_read polls with a timeout.
+        if _PS_WIN.get("h"):
+            while True:
+                k = _ps_win_read(0.25)
+                if k is not None:
+                    return k
         import msvcrt as _msvcrt
         ch = _msvcrt.getwch()
         if ch in ('\r', '\n'):  return 'ENTER'
@@ -13312,15 +13625,7 @@ def _stop_menu_music():
 
 def _inventory_music_on():
     """Start the inventory track (no-op without audio)."""
-    try:
-        snd = getattr(term, "sound", None) or globals().get("SOUND")
-        if snd is None:
-            pl = globals().get("player", None)
-            snd = getattr(pl, "sound", None)
-        if snd:
-            snd.start_inventory_bgm()
-    except Exception:
-        pass
+    return _inventory_music_on_force()
 
 
 def _inventory_music_on_force():
@@ -13340,19 +13645,27 @@ def _inventory_music_on_force():
 
 
 def _inventory_music_off():
+    """Stop the inventory track and bring the ambience back.
+
+    Never reference a bare `term` here: inside the game loop `term` is a
+    local, so the old lookup raised NameError and the music kept playing."""
+    snd = globals().get("SOUND")
+    if snd is None:
+        snd = getattr(globals().get("term"), "sound", None)
+    if snd is None:
+        snd = getattr(globals().get("player"), "sound", None)
+    if snd is None:
+        return False
     try:
-        snd = getattr(term, "sound", None) or globals().get("SOUND")
-        if snd is None:
-            pl = globals().get("player", None)
-            snd = getattr(pl, "sound", None)
-        if snd:
-            snd.stop_inventory_bgm()
-            try:
-                snd.start_ambient_bgm()
-            except Exception:
-                pass
+        snd.stop_inventory_bgm()
     except Exception:
         pass
+    try:
+        snd.start_ambient_bgm()
+    except Exception:
+        pass
+    return True
+
 
 
 CREDITS_LINES = [
@@ -13447,6 +13760,9 @@ def _prompt_debug_password():
 
 
 def _ps_mouse_on():
+    if not HAVE_TERMIOS:
+        _ps_win_console_on(mouse=True)
+        return
     try:
         # Match exactly what term.enable_mouse() enables so clicks and hover
         # both work on the save-select screen the same as everywhere in-game.
@@ -13456,6 +13772,9 @@ def _ps_mouse_on():
         pass
 
 def _ps_mouse_off():
+    if not HAVE_TERMIOS:
+        _ps_win_console_off()
+        return
     try:
         sys.stdout.write("\033[?1003l\033[?1002l\033[?1000l\033[?1006l")
         sys.stdout.flush()
@@ -14450,6 +14769,12 @@ def main():
             print("  🔇 Continuing without sound.")
         player.sound = sound
         world.sound = sound
+        # Expose the sound manager where the music helpers look for it.
+        # Without this, term.sound / SOUND were never set, so the inventory
+        # track (assets/music_inventory.ogg) silently never started.
+        term.sound = sound
+        globals()["SOUND"] = sound
+        globals()["player"] = player
         if sound.enabled:
             sound.play_intro()
             sound.play_environment(world.biome)
@@ -15685,22 +16010,28 @@ def main():
                         out.append("")
                     # Tools / Weapons durability
                     tools_info = []
+                    tools_keys = []
                     if player.inventory.get("advanced_axe", 0) > 0:
-                        tools_info.append(f"    🪓 Advanced Axe              {int(max(0,player.axe_dur))}/{TOOL_DUR_ADV}  ({int(max(0,player.axe_dur)/TOOL_DUR_ADV*100)}%)")
+                        tools_keys.append("advanced_axe"); tools_info.append(f"    🪓 Advanced Axe              {int(max(0,player.axe_dur))}/{TOOL_DUR_ADV}  ({int(max(0,player.axe_dur)/TOOL_DUR_ADV*100)}%)")
                     elif player.inventory.get("axe", 0) > 0:
-                        tools_info.append(f"    🪓 Axe                       {int(max(0,player.axe_dur))}/{TOOL_DUR}  ({int(max(0,player.axe_dur)/TOOL_DUR*100)}%)")
+                        tools_keys.append("axe"); tools_info.append(f"    🪓 Axe                       {int(max(0,player.axe_dur))}/{TOOL_DUR}  ({int(max(0,player.axe_dur)/TOOL_DUR*100)}%)")
                     if player.inventory.get("pickaxe", 0) > 0:
-                        tools_info.append(f"    ⛏️ Pickaxe                   {int(max(0,player.pickaxe_dur))}/{TOOL_DUR}  ({int(max(0,player.pickaxe_dur)/TOOL_DUR*100)}%)")
+                        tools_keys.append("pickaxe"); tools_info.append(f"    ⛏️ Pickaxe                   {int(max(0,player.pickaxe_dur))}/{TOOL_DUR}  ({int(max(0,player.pickaxe_dur)/TOOL_DUR*100)}%)")
                     if player.spear_type and player.inventory.get(player.spear_type, 0) > 0 and player.spear_dur > 0:
                         sdef_h = SPEAR_DEFS.get(player.spear_type, {})
-                        tools_info.append(f"    🗡️ {player.spear_type.replace('_',' ').title():<24} {int(max(0,player.spear_dur))}/{sdef_h.get('dur',100)}  ({int(max(0,player.spear_dur)/max(1,sdef_h.get('dur',100))*100)}%)")
+                        tools_keys.append(player.spear_type); tools_info.append(f"    🗡️ {player.spear_type.replace('_',' ').title():<24} {int(max(0,player.spear_dur))}/{sdef_h.get('dur',100)}  ({int(max(0,player.spear_dur)/max(1,sdef_h.get('dur',100))*100)}%)")
                     if player.wearing and player.armor_dur > 0:
                         armor_max = 1800 if player.wearing == "heavy_armor" else (1000 if player.wearing == "medium_armor" else 500)
                         armor_pct = int((player.armor_dur / armor_max) * 100)
-                        tools_info.append(f"    🛡️ {player.wearing.replace('_',' ').title():<24} {int(player.armor_dur)} dur ({armor_pct}%)")
+                        tools_keys.append(player.wearing); tools_info.append(f"    🛡️ {player.wearing.replace('_',' ').title():<24} {int(player.armor_dur)} dur ({armor_pct}%)")
                     if tools_info:
                         out.append(""); out.append("  🔧 TOOLS / WEAPONS:")
-                        out.extend(tools_info)
+                        for _tl, _tkey in zip(tools_info, tools_keys):
+                            _tline = len(out)
+                            out.append(_tl)
+                            _ttip = item_tooltip_text(_tkey)
+                            if _ttip:
+                                _inv_tip_zones.setdefault(_tline, []).append((0, TERM_WIDTH, _ttip))
                         out.append("")
                     # Station HP
                     st_info = [(st, hp) for st, hp in player.station_hp.items() if player.inventory.get(st, 0) > 0]
@@ -15708,7 +16039,13 @@ def main():
                         out.append("  🏭 STATIONS (all):")
                         for st, hp in st_info:
                             pct = int(max(0, hp) / STATION_MAX_HP * 100)
+                            _stline = len(out)
                             out.append(f"    {st.replace('_',' ').title():<28} {int(hp):.0f}/{int(STATION_MAX_HP)} GWM  ({pct}%)")
+                            _sttip = item_tooltip_text(st)
+                            _stextra = (f"\n🏭 Durability: {int(hp)}/{int(STATION_MAX_HP)} GWM ({pct}%)"
+                                        "\nRepair it at a woodworking station before it breaks.")
+                            _inv_tip_zones.setdefault(_stline, []).append(
+                                (0, TERM_WIDTH, (_sttip or st.replace('_',' ').title()) + _stextra))
                         out.append("")
                     # Adapt page length to terminal height — narrow/short
                     # terminals get more pages, tall terminals get fewer.
@@ -15740,79 +16077,7 @@ def main():
 
                 # ---- EXPLAIN ----
                 elif act == "explain" and arg:
-                    target = arg.lower()
-                    key_match = target if target in GAME_MECHANICS else next((k for k in GAME_MECHANICS if target in k or k in target), None)
-                    if key_match:
-                        term.print_page([f"📘 {key_match.replace('_',' ').title()}", "─"*TERM_WIDTH, GAME_MECHANICS[key_match]]); continue
-                    tk = target.replace(" ","_")
-                    if tk in GATHER_ALIASES: tk = GATHER_ALIASES[tk]
-                    if tk in CONSUME_ALIASES: tk = CONSUME_ALIASES[tk]
-                    out = [f"📘 {tk.replace('_',' ').title()}", "─"*TERM_WIDTH]
-                    # Check if craftable
-                    recipe = RECIPES.get(tk)
-                    if recipe:
-                        out.append("🔨 RECIPE:")
-                        mat_parts = []
-                        for k_m, v_m in recipe.get("mat",{}).items():
-                            label = "any berry" if k_m == "any_berry" else k_m.replace("_"," ")
-                            mat_parts.append(f"{v_m} {label}")
-                        out.append(f"  Materials: {', '.join(mat_parts) or '—'}")
-                        st = recipe.get("station","—") or "—"
-                        if isinstance(st,list): st = " + ".join(s.replace("_"," ") for s in st)
-                        elif st != "—": st = st.replace("_"," ")
-                        out.append(f"  Station: {st}")
-                        out.append(f"  Time: {recipe.get('igm',0)}s, Energy: {recipe.get('energy',0)}⚡")
-                        # Check what recipes consume this item
-                        consumed_in = []
-                        for r_name, r_info in RECIPES.items():
-                            if tk in r_info.get("mat", {}):
-                                consumed_in.append(f"{r_name.replace('_',' ').title()} ({r_info['mat'][tk]})")
-                        if consumed_in:
-                            out.append(f"  Used in: {', '.join(consumed_in)}")
-                        out.append("")
-                    # Check if findable (biome resource)
-                    found_in = []
-                    for biome, resources in [("Forest", BIOME_RESOURCES.get("Forest",{})), ("Arctic", BIOME_RESOURCES.get("Arctic",{}))]:
-                        for res_name, res_meta in resources.items():
-                            if res_meta.get("item") == tk:
-                                found_in.append(f"  {res_name} (🕐 {biome})")
-                    if found_in:
-                        out.append("📍 FOUND IN:")
-                        out.extend(found_in)
-                        out.append("")
-                    # Check for food effects
-                    eff = food_effects.get(tk)
-                    if eff:
-                        out.append("⚙️ FOOD EFFECTS:")
-                        stats = []
-                        for stat,icon in [("energy","⚡"),("hunger","🍽️"),("health","❤️"),("thirst","💧"),("fatigue","😴")]:
-                            if eff.get(stat): stats.append(f"{icon}{eff[stat]}")
-                        if stats: out.append(f"  Stats: {', '.join(stats)}")
-                        if eff.get("notes"): out.append(f"  Note: {eff['notes']}")
-                        if eff.get("risk_min"): out.append(f"  ⚠️ Risk: {int(eff['risk_min']*100)}-{int(eff['risk_max']*100)}% for {eff.get('risk_dmg',0)} dmg")
-                        elif eff.get("risk") == "unknown": out.append("  ❓ UNKNOWN RISK")
-                        elif eff.get("risk") == "mystery_mushroom": out.append("  ❓ MYSTERY: Random effects each time!")
-                        elif eff.get("risk") == "mystery_moss": out.append("  ❓ MYSTERY MOSS: 50% heal or damage!")
-                        out.append("")
-                    else:
-                        out.append(f"🔍 ID chance per attempt: {int(IDENTIFY_CHANCES.get(tk,0.0)*100)}%")
-                        out.append("")
-                    # Disease info
-                    diseases = getattr(player, "diseases", None) or {}
-                    if diseases:
-                        out.append("🩺 DISEASES:")
-                        for did, st in diseases.items():
-                            d = DISEASES.get(did, {})
-                            if tk in d.get("recover", {}):
-                                out.append(f"  {DISEASE_DISPLAY[did]}: {d['recover'][tk]*100:.0f}% cure chance")
-                        out.append("")
-                    # Shop info
-                    price = ITEM_PRICES.get(tk)
-                    if price:
-                        out.append("🏪 SHOP:")
-                        out.append(f"  Buy: {int(price*1.5)}🪙 | Sell: {price}🪙")
-                    else:
-                        out.append("🏪 Not sold in shop.")
+                    out = build_explain_lines(arg, player, TERM_WIDTH)
                     term.print_page(out)
                     qt_on_event(term, player, world, "explain_done", target=arg)
 

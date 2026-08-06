@@ -18,15 +18,20 @@ jobs:
       - name: Create runtime hook
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
-      - name: Build with PyInstaller
-        # Changed to look for "9 Planets Beta" instead of "assets"
+      - name: Build game with PyInstaller
         run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta;9 Planets Beta" --icon="logo.ico" 9_planets.py
+        
+      - name: Build launcher with PyInstaller
+        # This creates a launcher.exe that works on Windows
+        run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.ico" launcher.py
         
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
         with:
           name: 9Planets-Windows
-          path: dist/9Planets.exe
+          path: |
+            dist/9Planets.exe
+            dist/Launch 9 Planets.exe
 
   build-macos:
     runs-on: macos-latest
@@ -40,15 +45,19 @@ jobs:
       - name: Create runtime hook
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
-      - name: Build with PyInstaller
-        # Changed to look for "9 Planets Beta" instead of "assets"
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" --icon="logo.icns" 9_planets.py
+      - name: Build game with PyInstaller
+        run: pyinstaller --onefile --windowed --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" --icon="logo.icns" 9_planets.py
+        
+      - name: Build launcher with PyInstaller
+        run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.icns" launcher.py
         
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
         with:
           name: 9Planets-Mac
-          path: dist/9Planets
+          path: |
+            dist/9Planets
+            dist/Launch 9 Planets
 
   build-linux:
     runs-on: ubuntu-latest
@@ -62,12 +71,16 @@ jobs:
       - name: Create runtime hook
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
-      - name: Build with PyInstaller
-        # Changed to look for "9 Planets Beta" instead of "assets"
+      - name: Build game with PyInstaller
         run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" 9_planets.py
+        
+      - name: Build launcher with PyInstaller
+        run: pyinstaller --onefile --name "Launch 9 Planets" launcher.py
         
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4
         with:
           name: 9Planets-Linux
-          path: dist/9Planets
+          path: |
+            dist/9Planets
+            dist/Launch 9 Planets

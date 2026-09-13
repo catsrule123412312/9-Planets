@@ -19,10 +19,10 @@ jobs:
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build game with PyInstaller
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta;9 Planets Beta" --icon="logo.ico" 9_planets.py
+        # Updated paths to point inside "9 Planets Beta" folder
+        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta/assets;assets" --icon="logo.ico" "9 Planets Beta/9_planets.py"
         
       - name: Build launcher with PyInstaller
-        # This creates a launcher.exe that works on Windows
         run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.ico" launcher.py
         
       - name: Upload Windows Build
@@ -46,7 +46,7 @@ jobs:
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build game with PyInstaller
-        run: pyinstaller --onefile --windowed --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" --icon="logo.icns" 9_planets.py
+        run: pyinstaller --onefile --windowed --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta/assets:assets" --icon="logo.icns" "9 Planets Beta/9_planets.py"
         
       - name: Build launcher with PyInstaller
         run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.icns" launcher.py
@@ -72,7 +72,7 @@ jobs:
         run: echo "import sys, os; os.chdir(sys._MEIPASS)" > hook.py
         
       - name: Build game with PyInstaller
-        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta:9 Planets Beta" 9_planets.py
+        run: pyinstaller --onefile --runtime-hook=hook.py --name "9Planets" --add-data "9 Planets Beta/assets:assets" "9 Planets Beta/9_planets.py"
         
       - name: Build launcher with PyInstaller
         run: pyinstaller --onefile --name "Launch 9 Planets" launcher.py

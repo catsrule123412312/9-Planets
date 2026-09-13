@@ -11,7 +11,7 @@ CHANGES v17: quest display active-only, plank quest checks inventory, first-nigh
          station display show all, tools durability in inventory.
 """
 
-import time, random, math, json, os, sys, select, signal, unicodedata, threading, io, re
+import time, random, math, json, os, sys, select, signal, unicodedata, threading, io, re, subprocess
 try:
     import tty, termios
     HAVE_TERMIOS = True
@@ -753,7 +753,7 @@ def vljust(s, width):
     return s + ' ' * max(0, gap)
 
 # ==================== CONFIGURATION ====================
-SAVES_DIR = "saves"  # directory that holds all named save files
+SAVES_DIR = str(_pathlib.Path(__file__).resolve().parent / "saves")  # directory that holds all named save files
 FOG_RADIUS = 12
 SPD_DAY = 0.5; SPD_NIGHT = 1.5
 HUNGER_IDLE_RATE = 1.0 / 25.0; THIRST_IDLE_RATE = HUNGER_IDLE_RATE * 0.5
@@ -2211,7 +2211,43 @@ class SoundManager:
     def play_quest_complete(self): self._play("quest_complete")
     def play_gather_all(self):  self._play("gather_all")
     def play_animal(self):      self._play("animal")
-    def play_lightning(self):   self._play("lightning")
+    def play_lightning(self):
+        path = resolve_exact_asset("lightning")
+        if not path:
+            return
+        if not PYGAME_AVAILABLE or pygame is None:
+            self._play_external_audio(path)
+            return
+        if not PYGAME_AVAILABLE or pygame is None:
+            self._play_external_audio(path)
+            return
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(SOUND_SAMPLE_RATE, -16, 2, SOUND_BUFFER_SIZE)
+            pygame.mixer.stop()
+            pygame.mixer.music.stop()
+        except Exception:
+            self._play_external_audio(path)
+            return
+        try:
+            pygame.mixer.music.set_volume(1.0)
+            pygame.mixer.music.load(str(path))
+            pygame.mixer.music.play()
+        except Exception:
+            self._play_external_audio(path)
+
+    @staticmethod
+    def _play_external_audio(path):
+        """Fallback for systems without a pygame OGG decoder."""
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(path))
+            else:
+                subprocess.Popen(["xdg-open", str(path)],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
     def play_tornado(self):     self._play("tornado")
     def play_low_health(self):  self._play("low_health")
     def play_damage(self, amount=0):
@@ -2226,13 +2262,28 @@ class SoundManager:
     def _asset_sound(filename):
         """Load an OGG/WAV from the assets/ folder next to 9planets.py.
         Returns a pygame.mixer.Sound on success, or None if the file is missing."""
-        path = resolve_asset_path(filename)
+        path = resolve_exact_asset(filename.rsplit(".", 1)[0])
+        if not path:
+            path = resolve_asset_path(filename)
         if not path:
             return None
         try:
             return pygame.mixer.Sound(str(path))
         except Exception:
             return None
+
+    @staticmethod
+    def _amplify_sound(sound, gain):
+        """Return a clipped, digitally amplified copy of a mixer sound."""
+        try:
+            samples = array("h", sound.get_raw())
+            amplified = array(
+                "h",
+                (max(-32768, min(32767, int(sample * gain))) for sample in samples),
+            )
+            return pygame.mixer.Sound(buffer=amplified)
+        except Exception:
+            return sound
 
     def _load_cat_meows(self):
         """Load cat-meow recordings (still embedded) plus the crafting /
@@ -2254,10 +2305,18 @@ class SoundManager:
             "music_cook_end.ogg":   "craft_cook_end",
             "music_smelter.ogg":    "craft_smelter",
             "music_sewing.ogg":     "craft_sewing_station",
+            "lightning.ogg":        "lightning",
         }
         for filename, sname in asset_map.items():
             snd = self._asset_sound(filename)
             if snd:
+                if sname == "lightning":
+                    amplified = self._amplify_sound(snd, 4.0)
+                    snd = amplified or snd
+                    try:
+                        snd.set_volume(1.0)
+                    except Exception:
+                        pass
                 self.sounds[sname] = snd
         try:
             self._load_god_voice()
@@ -2741,6 +2800,7 @@ SPEAR_DEFS = {
     "heavy_spear":             {"dur":200, "strike":10, "throw":30, "miss_pct":0.0,  "throw_cost":50,   "cursor_mult":1.8,  "strike_cost":5,  "icon":"⚒️"},
     "advanced_heavy_spear":    {"dur":500, "strike":10, "throw":30, "miss_pct":0.0,  "throw_cost":50,   "cursor_mult":1.8,  "strike_cost":5,  "icon":"⚒️⚔️"},
     "grot_tooth":              {"dur":100, "strike":15, "throw":0,  "miss_pct":0.10, "throw_cost":9999, "cursor_mult":1.0,  "range":1, "icon":"🦴", "cat":"🗡️ Melee"},
+    "wolf_tooth":              {"dur":100, "strike":10, "throw":0,  "miss_pct":0.10, "throw_cost":9999, "cursor_mult":1.45, "range":1, "icon":"🐺", "cat":"🗡️ Melee"},
 }
 
 # ==================== SPEAR MINIGAME DATA ====================
@@ -2850,13 +2910,117 @@ ANIMAL_DEFS = {
     "antelope":      {"biome":"Forest","hp":30, "speed_cpm":20,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{"meat":15},        "icon":"🐐","spawn_rate":0.00},
     "young_antelope":{"biome":"Forest","hp":15, "speed_cpm":10,"vision_peak":2.5,"vision_max":5,"group":(1,1),  "loot":{"meat":10},        "icon":"🐐","spawn_rate":0.00},
     "cat":           {"biome":"Forest","hp":3,  "speed_cpm":30,"vision_peak":5,"vision_max":10, "group":(1,1),  "loot":{},                 "icon":"🐈","spawn_rate":0.00,"atk":2,"def":1},
-    "young_cat":     {"biome":"Forest","hp":1,  "speed_cpm":20,"vision_peak":3,"vision_max":5,  "group":(1,1),  "loot":{},                 "icon":"🐱","spawn_rate":0.00,"atk":0,"def":0},
+    "wolf":          {"biome":"Forest","hp":12, "speed_cpm":48,"vision_peak":7,"vision_max":10, "group":(5,20), "loot":{"meat":5}, "icon":"🐺","spawn_rate":0.04},
+    "young_wolf":    {"biome":"Forest","hp":6, "speed_cpm":40,"vision_peak":6,"vision_max":8, "group":(1,1), "loot":{"meat":3}, "icon":"🐺","spawn_rate":0.00},
     "salmon":        {"biome":"Arctic","hp":5,  "speed_cpm":20,"vision_peak":3,"vision_max":6,  "group":(1,1),  "loot":{"meat":2},         "icon":"🐟","spawn_rate":0.02},
     "seal":          {"biome":"Arctic","hp":10, "speed_cpm":25,"vision_peak":5,"vision_max":10, "group":(2,4),  "loot":{"meat":6,"bone":3},"icon":"🦭","spawn_rate":0.01},
     "penguin":       {"biome":"Arctic","hp":10, "speed_cpm":8, "vision_peak":5,"vision_max":10, "group":(50,50),"loot":{"meat":6,"bone":3},"icon":"🐧","spawn_rate":0.02,"panic":True},
-    "grot":          {"biome":["Forest","Arctic"],"hp":5,"speed_cpm":15,"vision_peak":5,"vision_max":5,"group":(1,1),"icon":"👹","spawn_rate":0.00},
+    "grot":          {"biome":["Forest","Arctic"],"hp":5,"speed_cpm":15,"vision_peak":5,"vision_max":5,"group":(1,1),"icon":"👹","spawn_rate":0.01},
     "grot_leader":   {"biome":["Forest","Arctic"],"hp":12,"speed_cpm":12,"vision_peak":8,"vision_max":10,"group":(1,1),"loot":{"grot_hide":2,"grot_tooth":1,"coins":15},"icon":"👑","spawn_rate":0.00},
 }
+
+ANIMAL_FOOD_ITEMS = {
+    "water", "fresh_water", "dirty_water", "arctic_water", "snow",
+    "mushrooms", "wild_berries", "sweet_berries", "frostberry", "meat",
+    "raw_game", "night_bug", "ironroot", "fibergrass",
+}
+ANIMAL_FOOD_PREFERENCES = {
+    "rabbit": {"wild_berries": 5, "sweet_berries": 5, "frostberry": 4, "mushrooms": 3, "fibergrass": 2, "ironroot": 1},
+    "squirrel": {"wild_berries": 5, "sweet_berries": 5, "mushrooms": 4, "night_bug": 3, "fibergrass": 2, "ironroot": 1},
+    "deer": {"fibergrass": 5, "ironroot": 4, "wild_berries": 3, "sweet_berries": 3, "mushrooms": 2, "frostberry": 2},
+    "antelope": {"fibergrass": 5, "ironroot": 4, "wild_berries": 2, "sweet_berries": 2, "mushrooms": 1},
+    "salmon": {"night_bug": 5, "meat": 1, "raw_game": 1},
+    "seal": {"meat": 5, "raw_game": 5, "night_bug": 1},
+    "penguin": {"night_bug": 4, "meat": 3, "raw_game": 3},
+    "wolf": {"meat": 10, "raw_game": 10},
+}
+ANIMAL_POPULATION_CAPS = {
+    "rabbit": 12, "young_rabbit": 12,
+    "squirrel": 10, "young_squirrel": 10,
+    "deer": 6, "young_deer": 6,
+    "antelope": 5, "young_antelope": 5,
+    "wolf": 80, "young_wolf": 80,
+}
+ANIMAL_CELL_CAP = 5
+ANIMAL_SIM_RADIUS = 100.0
+RABBIT_HOLE = "rabbit_hole"
+ANIMAL_SIZE = {
+    "young_rabbit": 1, "rabbit": 2,
+    "young_squirrel": 1, "squirrel": 2,
+    "young_deer": 3, "deer": 5,
+    "young_antelope": 4, "antelope": 6,
+    "young_wolf": 3, "wolf": 4,
+    "young_cat": 2, "cat": 3,
+    "salmon": 1, "penguin": 3, "seal": 5,
+}
+ANIMAL_FORAGE_RATE = {
+    "rabbit": 0.15, "young_rabbit": 0.10,
+    "squirrel": 0.20, "young_squirrel": 0.12,
+    "deer": 1.80, "young_deer": 0.90,
+    "antelope": 2.20, "young_antelope": 1.10,
+    "wolf": 1.0, "young_wolf": 0.7,
+    "salmon": 0.40, "penguin": 0.60, "seal": 1.00,
+}
+ANIMAL_HUNGER_RATE = {
+    "rabbit": 100.0 / (5.0 * DAY_LENGTH), "young_rabbit": 100.0 / (3.0 * DAY_LENGTH),
+    "squirrel": 100.0 / (7.0 * DAY_LENGTH), "young_squirrel": 100.0 / (4.0 * DAY_LENGTH),
+    "deer": 100.0 / (12.0 * DAY_LENGTH), "young_deer": 100.0 / (8.0 * DAY_LENGTH),
+    "antelope": 100.0 / (14.0 * DAY_LENGTH), "young_antelope": 100.0 / (9.0 * DAY_LENGTH),
+    "wolf": 100.0 / (5.0 * DAY_LENGTH), "young_wolf": 100.0 / (4.0 * DAY_LENGTH),
+}
+ANIMAL_FULLNESS_TARGET = {
+    "rabbit": 75.0, "young_rabbit": 65.0,
+    "squirrel": 70.0, "young_squirrel": 60.0,
+    "deer": 85.0, "young_deer": 75.0,
+    "antelope": 88.0, "young_antelope": 78.0,
+    "wolf": 75.0, "young_wolf": 65.0,
+}
+ANIMAL_SMELL_RADIUS = {
+    "rabbit": 12.0, "young_rabbit": 8.0,
+    "squirrel": 18.0, "young_squirrel": 12.0,
+    "deer": 45.0, "young_deer": 30.0,
+    "antelope": 55.0, "young_antelope": 35.0,
+    "wolf": 60.0, "young_wolf": 40.0,
+}
+ANIMAL_DISEASE_IMMUNITY = {
+    "rabbit": {"cholera", "typhoid_fever"},
+    "squirrel": {"cholera"},
+    "deer": {"cholera", "dysentery", "norovirus"},
+    "antelope": {"cholera", "dysentery", "norovirus"},
+    "penguin": {"cholera", "dysentery"},
+    "seal": {"cholera"},
+    "wolf": {"cholera"},
+}
+
+
+def animal_food_preference(animal_type, item):
+    base_type = animal_type.removeprefix("young_")
+    return ANIMAL_FOOD_PREFERENCES.get(base_type, {}).get(item, 1)
+
+def animal_meat_yield(animal):
+    """Scale meat with fullness; a fully fed deer is worth five extra meat."""
+    animal_type = animal.get("type", "rabbit")
+    base = ANIMAL_DEFS.get(animal_type, {}).get("loot", {}).get("meat", 1)
+    fullness = max(0.0, min(100.0, float(animal.get("fullness", animal.get("hunger", 100.0)))))
+    amount = max(1, int(round(base * (0.5 + fullness / 200.0))))
+    if animal_type == "deer" and fullness >= 95.0:
+        amount += 5
+    return amount
+
+def wolf_stats(diseased=False, young=False):
+    """Roll wolf stats once; disease halves combat and speed, not meat or vision."""
+    if young:
+        stats = {"hp": 6, "atk": 2, "def": 2, "speed_cpm": 40,
+                 "vision_peak": 6, "vision_max": 8}
+    else:
+        stats = {"hp": random.randint(10, 15), "atk": random.randint(3, 10),
+                 "def": random.randint(3, 10), "speed_cpm": random.randint(35, 60),
+                 "vision_peak": random.randint(5, 10), "vision_max": random.randint(5, 10)}
+        stats["vision_max"] = max(stats["vision_max"], stats["vision_peak"])
+    if diseased:
+        for key in ("hp", "atk", "def", "speed_cpm"):
+            stats[key] = max(1, int(round(stats[key] * 0.5)))
+    return stats
 
 ANIMAL_XP = {
     "rabbit": 3,
@@ -3902,6 +4066,7 @@ DISPLAY_ITEM_NAME_MAP = {
     **{item["id"]: item["name"] for item in MUSHROOM_TYPES},
     **{item["id"]: item["name"] for item in MOSS_TYPES},
     "grot_tooth": "🐾 👹 Grot Tooth",
+    "wolf_tooth": "🐺 Wolf Tooth",
     "advanced_axe": "🪓⚡ Advanced Axe",
     "axe": "🪓 Axe",
 }
@@ -4285,6 +4450,7 @@ ITEM_PRICES = {
     "sewing_station": 400, "fabric": 30, "bandages": 25, "light_armor": 500, "enhanced_bandage": 40,
     "smelter": 600, "raw_game": 8, "bone": 4, "gold_ore": 100, "copper_ore": 20, "iron_ore": 15,
     "grot_tooth": 20,
+    "wolf_tooth": 30,
     "copper": 40, "iron": 30, "gold": 200, "oil": 150, "very_strong_fabric": 60,
     "plastic": 300, "necroplastic": 800, "steel": 100, "medium_armor": 1500, "heavy_armor": 3000,
     "fire_fuel": 300, "coffee_beans": 30, "coffee": 35,
@@ -4309,7 +4475,7 @@ ITEM_PRICES = {
 }
 
 SHOP_CATEGORIES = {
-    "1. 🌿 Resources":       ["wood","rock","ironroot","fibergrass","water","dirt","night_bug","spider_silk","venom_sac","bee_hive","moss_harmful","moss_healing","moss_mystery","mushroom_death_cap","grot_tooth"],
+    "1. 🌿 Resources":       ["wood","rock","ironroot","fibergrass","water","dirt","night_bug","spider_silk","venom_sac","bee_hive","moss_harmful","moss_healing","moss_mystery","mushroom_death_cap","grot_tooth","wolf_tooth"],
     "2. 🍄 Foods & Berries": ["wild_berries","sweet_berries","sour_berries","glowing_berries","poisonous_berry","mushrooms","black_trumpets","spotted_mushrooms","mystery_mushroom","frostberry","shimmer_frostberry","honey","roasted_berry","cooked_berry","roasted_spotted_mushroom","cooked_shimmer_frostberry","herbal_tea","chunky_stew","roasted_meat","health_potion","filtered_water","coffee_beans","coffee"],
     "3. 🥩 Meat":            ["meat","raw_game","thin_cut_meat","thick_cut_meat","stuffed_thin_meat","stuffed_thin_meat_berries","stuffed_thin_meat_honey","stuffed_thin_meat_meat"],
     "4. 🔨 Tools & Mats":   ["axe","advanced_axe","pickaxe","plank","trap","poison_trap","beeswax","oil","fire_fuel","plastic","necroplastic","copper","iron","gold","copper_ore","iron_ore","gold_ore","steel","very_strong_fabric","fabric","poison"],
@@ -4483,7 +4649,7 @@ GATHER_ALIASES = {
     "freezing water":"freezing_water","freezing_water":"freezing_water",
     "freezing dirty water":"freezing_dirty_water","freezing_dirty_water":"freezing_dirty_water",
     "arctic water":"arctic_water",
-    "rabbit":"rabbit","squirrel":"squirrel","salmon":"salmon","seal":"seal","penguin":"penguin",
+    "rabbit":"rabbit","squirrel":"squirrel","salmon":"salmon","seal":"seal","penguin":"penguin","wolf":"wolf",
 }
 
 CONSUME_ALIASES = {
@@ -5585,17 +5751,28 @@ class Terminal:
     def get_key(self, timeout=0.1):
         if self.using_windows_fallback:
             if getattr(self, "_win_stdin", None):
-                return self._win_read_event(timeout)
+                key = self._win_read_event(timeout)
+                if key in ('UP', 'DOWN', 'LEFT', 'RIGHT'):
+                    now = time.time()
+                    last = getattr(self, "_last_windows_arrow", 0.0)
+                    if now - last < 0.15:
+                        return None
+                    self._last_windows_arrow = now
+                return key
             start = time.time()
             while time.time() - start < timeout:
                 if msvcrt.kbhit():
                     ch = msvcrt.getwch()
                     if ch in ('\x00', '\xe0'):
                         seq = msvcrt.getwch()
-                        if seq == 'H': return 'UP'
-                        if seq == 'P': return 'DOWN'
-                        if seq == 'M': return 'RIGHT'
-                        if seq == 'K': return 'LEFT'
+                        key = {'H': 'UP', 'P': 'DOWN', 'M': 'RIGHT', 'K': 'LEFT'}.get(seq)
+                        if key:
+                            now = time.time()
+                            last = getattr(self, "_last_windows_arrow", 0.0)
+                            if now - last < 0.15:
+                                return None
+                            self._last_windows_arrow = now
+                            return key
                         return None
                     return ch
             return None
@@ -6870,6 +7047,7 @@ class WeatherSystem:
     def update_hourly(self, world, player):
         self.lightning_hit = False
         self.tornado_hit = False
+        _was_raining = self.is_raining()
         # Branch to Arctic-specific weather when player is in Arctic
         if biome_at(player.x, player.y) == "Arctic":
             return self._update_arctic(world, player)
@@ -6919,6 +7097,11 @@ class WeatherSystem:
         if chosen == "clear": self.current = "☀️ clear"; self.intensity = 0; return "☀️ Clear skies."
         self.current = chosen
         self.intensity = 4 if chosen=="heavy_storm" else (3 if chosen=="medium_storm" else (2 if chosen=="light_storm" else 1))
+        if not _was_raining:
+            try:
+                _play_rain_video(self.intensity)
+            except Exception:
+                pass
         self.rain_hours += 1
         rate = 0.10 if self.intensity==2 else (0.15 if self.intensity==3 else 0.30)
         if rate > 0:
@@ -7158,6 +7341,48 @@ WATER_DISEASES = [d for d,v in DISEASES.items() if v["cat"]=="water"]
 FOOD_DISEASES  = [d for d,v in DISEASES.items() if v["cat"]=="food" and not v.get("rare")]
 WATER_OR_FOOD  = [d for d,v in DISEASES.items() if v["cat"]=="water_food"]
 RARE_FOOD      = [d for d,v in DISEASES.items() if v.get("rare")]
+
+def _animal_base_type(animal_type):
+    return animal_type.removeprefix("young_")
+
+def _animal_disease_tick(animal, dt, now):
+    """Apply player-like disease handicaps to an animal without player UI hooks."""
+    diseases = animal.setdefault("diseases", {})
+    base_type = _animal_base_type(animal.get("type", ""))
+    if now - animal.get("last_disease_tick", now) < GAME_HOUR:
+        return
+    animal["last_disease_tick"] = now
+    for disease_id, state in list(diseases.items()):
+        disease = DISEASES.get(disease_id, {})
+        stacks = state.get("stacks", 1)
+        multiplier = 3 ** max(0, stacks - 1)
+        for stat, delta in disease.get("effects", {}).items():
+            if stat == "health":
+                animal["hp"] = max(0.0, animal.get("hp", 1) + delta * multiplier)
+            elif stat in ("hunger", "thirst", "energy"):
+                animal[stat] = max(0.0, min(100.0, animal.get(stat, 100.0) + delta * multiplier))
+        days_left = state.get("days_left")
+        if days_left is not None:
+            state["days_left"] = days_left - 1
+            if state["days_left"] <= 0:
+                del diseases[disease_id]
+    if diseases and random.random() < min(0.25, dt / max(1.0, GAME_HOUR) * 0.04):
+        cured = random.choice(list(diseases))
+        del diseases[cured]
+
+def _animal_contract_disease(animal, source):
+    if random.random() >= (0.025 if source == "water" else 0.012):
+        return
+    pool = WATER_DISEASES + WATER_OR_FOOD if source == "water" else FOOD_DISEASES + WATER_OR_FOOD
+    pool = [d for d in pool if d not in ANIMAL_DISEASE_IMMUNITY.get(_animal_base_type(animal.get("type", "")), set())]
+    if not pool:
+        return
+    disease_id = random.choice(pool)
+    state = animal.setdefault("diseases", {}).setdefault(disease_id, {"stacks": 0, "days_left": None})
+    state["stacks"] = state.get("stacks", 0) + 1
+    disease = DISEASES[disease_id]
+    if state.get("days_left") is None and isinstance(disease.get("days"), int):
+        state["days_left"] = disease["days"]
 
 def _pick_disease(pool):
     if not pool: return None
@@ -8282,6 +8507,7 @@ class World:
         self.animals = []
         self.last_spawn = 0.0
         self.last_young_spawn = 0.0
+        self._animal_spawned_areas = set()
         self.arctic_weather_mods = {}  # item → {cluster_rate_mult, qty_mult}
         self.houses = []              # list of placed house dicts
         self.game_start_real_time = time.time()   # for lazy weather history simulation
@@ -8319,11 +8545,13 @@ class World:
         return cl
 
     def _simulate_animal_offline(self, a, stored_at):
-        """Lazy simulation: animals drift, heal and age while stored in SQLite."""
+        """Lazy simulation: distant creatures age, tire, drift and take survival damage while offloaded."""
         now = time.time()
         elapsed = max(0.0, now - (stored_at or now))
         a["last_move"] = now
         if elapsed <= 0:
+            a.setdefault("life", a.get("hp", a.get("max_hp", 1)))
+            a.setdefault("max_life", a.get("max_hp", a.get("hp", 1)))
             return a
         try:
             # Wander: random drift that grows with time, capped so they stay in the area.
@@ -8331,11 +8559,41 @@ class World:
             ang = random.uniform(0, 2 * math.pi)
             a["x"] = a.get("x", 0.0) + drift * math.cos(ang)
             a["y"] = a.get("y", 0.0) + drift * math.sin(ang)
-            # Heal roughly 1 HP per game-hour spent away.
+
             mx = a.get("max_hp", a.get("hp", 1))
-            heal = elapsed / max(1.0, GAME_HOUR)
-            a["hp"] = min(mx, a.get("hp", mx) + heal)
+            a.setdefault("life", a.get("hp", mx))
+            a.setdefault("max_life", mx)
+
+            # Survival drain while far away: hunger, thirst, and cold/heat. The creatures still
+            # age as living entities even when the player is not nearby.
+            a.setdefault("hunger", 100.0)
+            a.setdefault("thirst", 100.0)
+            a.setdefault("energy", 100.0)
+            a.setdefault("fullness", a.get("hunger", 100.0))
+            a["hunger"] = max(0.0, a.get("hunger", 100.0) - elapsed * ANIMAL_HUNGER_RATE.get(a.get("type"), 0.04))
+            a["fullness"] = a["hunger"]
+            a["thirst"] = max(0.0, a.get("thirst", 100.0) - elapsed * 0.8)
+            a["energy"] = max(0.0, a.get("energy", 100.0) - elapsed * 0.4)
+            _animal_disease_tick(a, elapsed, now)
+
+            if a.get("hunger", 100.0) <= 0 or a.get("thirst", 100.0) <= 0:
+                dmg = (elapsed / max(1.0, DAY_LENGTH)) * (10.0 if a.get("type") in ("grot", "grot_leader") else max(1.0, mx))
+                a["hp"] = max(0.0, a.get("hp", mx) - dmg)
+
+            pos_biome = biome_at(a.get("x", 0.0), a.get("y", 0.0))
+            if pos_biome == "Arctic" and a.get("type") not in ("seal", "penguin"):
+                a["hp"] = max(0.0, a.get("hp", mx) - (elapsed / max(1.0, GAME_HOUR)) * 2.5)
+            if a.get("type") in ("grot", "grot_leader") and pos_biome == "Forest":
+                a["hp"] = max(0.0, a.get("hp", mx) - (elapsed / max(1.0, GAME_HOUR)) * 0.5)
+
+            # Heal a little while idle if the creature is not starving.
+            if a.get("hunger", 0.0) > 15.0 and a.get("thirst", 0.0) > 15.0:
+                heal = elapsed / max(1.0, GAME_HOUR)
+                a["hp"] = min(mx, a.get("hp", mx) + heal)
+
             a["fleeing"] = False
+            a["life"] = a.get("hp", a.get("life", mx))
+            a["max_life"] = mx
             for key in ("birth_time", "last_attack", "interest_until", "flee_until"):
                 if isinstance(a.get(key), (int, float)) and a[key] > 0:
                     a[key] = a[key] + elapsed
@@ -8356,8 +8614,12 @@ class World:
         px, py = player.x, player.y
 
         # --- push far clusters out of RAM ---
+        active_animals = [a for a in self.animals
+                          if math.hypot(a.get("x", 0.0) - px, a.get("y", 0.0) - py) <= ANIMAL_SIM_RADIUS]
         far = [(k, c) for k, c in self.clusters.items()
-               if math.hypot(k[0] - px, k[1] - py) > OFFLOAD_RADIUS]
+               if math.hypot(k[0] - px, k[1] - py) > OFFLOAD_RADIUS
+               and not any(math.hypot(k[0] - a.get("x", 0.0), k[1] - a.get("y", 0.0)) <= 24.0
+                           for a in active_animals)]
         if far:
             store.put_clusters(far, now)
             for k, _ in far:
@@ -8379,6 +8641,11 @@ class World:
             if key in self.depleted or key in self.clusters:
                 continue
             self.clusters[key] = self._simulate_cluster_offline(cl, stored_at)
+        for animal in active_animals:
+            for key, cl, stored_at in store.pop_clusters_near(animal.get("x", 0.0), animal.get("y", 0.0), 24.0):
+                if key in self.depleted or key in self.clusters:
+                    continue
+                self.clusters[key] = self._simulate_cluster_offline(cl, stored_at)
         for a, stored_at in store.pop_animals_near(px, py, RELOAD_RADIUS):
             self.animals.append(self._simulate_animal_offline(a, stored_at))
 
@@ -8396,11 +8663,11 @@ class World:
         cold = store.all_animals() if store else []
         return list(self.animals) + cold
 
-    def seed_initial_animals(self, player, radius=FOG_RADIUS*2):
+    def seed_initial_animals(self, player, radius=100):
         if biome_at(player.x, player.y) != "Forest":
             return
         now = time.time()
-        def add_animal(animal_type, min_r, max_r, birth_time=None):
+        def add_animal(animal_type, min_r, max_r, birth_time=None, pack_id=None):
             for _attempt in range(8):
                 angle = random.uniform(0, 2 * math.pi)
                 r = random.uniform(min_r, max_r)
@@ -8418,9 +8685,23 @@ class World:
                     "y": y,
                     "hp": adef["hp"],
                     "max_hp": adef["hp"],
+                    "life": adef["hp"],
+                    "max_life": adef["hp"],
                     "fleeing": False,
                     "last_move": now,
+                    # Interest tracking: how long the animal stays focused on the player
+                    "interest_until": now + 3.0 * GAME_HOUR,
+                    # Survival counters for animals within 100 tiles
+                    "hunger": 100.0,
+                    "thirst": 100.0,
+                    "energy": 100.0,
+                    "last_forage": now,
                 }
+                if animal_type in ("wolf", "young_wolf"):
+                    entry.update(wolf_stats(young=animal_type == "young_wolf"))
+                    entry["max_hp"] = entry["hp"]
+                    entry["life"] = entry["hp"]
+                    entry["pack_id"] = pack_id
                 if birth_time is not None:
                     entry["birth_time"] = birth_time
                 self.animals.append(entry)
@@ -8431,34 +8712,52 @@ class World:
         # Animals are spread over a wide radius so the player encounters them
         # while exploring, not just sitting at spawn.
         for _ in range(8):
-            add_animal("rabbit", 4, min(radius, 60))
+            add_animal("rabbit", 4, radius)
         for _ in range(6):
-            add_animal("squirrel", 4, min(radius, 60))
+            add_animal("squirrel", 4, radius)
         for _ in range(4):
-            add_animal("deer", 8, min(radius, 80))
+            add_animal("deer", 8, radius)
         for _ in range(3):
-            add_animal("antelope", 10, min(radius, 100))
+            add_animal("antelope", 10, radius)
+        pack_id = f"pack-{int(now * 1000)}"
+        for _ in range(random.randint(5, 20)):
+            add_animal("wolf", 10, radius, pack_id=pack_id)
         # A couple of cats spread out
         for _ in range(2):
-            add_animal("cat", 6, min(radius, 50))
+            add_animal("cat", 6, radius)
         # Seed baby animals alongside adults — use a fresh birth_time so they mature
         for _ in range(4):
-            add_animal("young_rabbit", 4, min(radius, 60), birth_time=now)
+            add_animal("young_rabbit", 4, radius, birth_time=now)
         for _ in range(3):
-            add_animal("young_squirrel", 4, min(radius, 60), birth_time=now)
+            add_animal("young_squirrel", 4, radius, birth_time=now)
         for _ in range(2):
-            add_animal("young_deer", 8, min(radius, 80), birth_time=now)
+            add_animal("young_deer", 8, radius, birth_time=now)
         for _ in range(1):
-            add_animal("young_antelope", 10, min(radius, 100), birth_time=now)
+            add_animal("young_antelope", 10, radius, birth_time=now)
+
+        for animal in self.animals:
+            self._animal_spawned_areas.add(self._animal_area_key(animal["x"], animal["y"]))
+        self._animal_spawned_areas.add(self._animal_area_key(player.x, player.y))
+
+    @staticmethod
+    def _animal_area_key(x, y):
+        return (int(x) // 100, int(y) // 100)
+
+    def spawn_animals_at_step(self, player):
+        """Seed a newly entered 100x100 area once, using the start-game batch."""
+        if biome_at(player.x, player.y) != "Forest":
+            return
+        area = self._animal_area_key(player.x, player.y)
+        if area in self._animal_spawned_areas:
+            return
+        self._animal_spawned_areas.add(area)
+        self.seed_initial_animals(player, radius=100)
 
     def spawn_young_animals(self, player):
         now = time.time()
-        # Check much more frequently: every 60 s instead of 360 s
-        if now - self.last_young_spawn < 60.0:
+        if now - self.last_young_spawn < 15.0:
             return
         self.last_young_spawn = now
-        if biome_at(player.x, player.y) != "Forest":
-            return
         def count_animals(animal_type):
             """Count ALL animals of this type in the world (not just near player)."""
             return sum(1 for a in self.animals if a["type"] == animal_type)
@@ -8469,36 +8768,69 @@ class World:
             ("deer", "young_deer"),
             ("antelope", "young_antelope"),
         ]
-
         for adult_type, young_type in adult_pairs:
             adults = count_animals(adult_type)
             existing_young = count_animals(young_type)
-            # Each adult has a strong chance to produce a baby every cycle.
-            # Target: at least as many babies as adults (1:1 ratio).
-            target_young = adults
-            spawn_needed = max(0, target_young - existing_young)
-            for _ in range(spawn_needed):
-                # Roll a high per-adult chance so babies appear quickly
-                if random.random() > 0.85:
+            species_cap = ANIMAL_POPULATION_CAPS.get(adult_type, 0)
+            if adults < 2 or adults + existing_young >= species_cap:
+                continue
+            pairs = []
+            fullness_target = ANIMAL_FULLNESS_TARGET.get(adult_type, 75.0)
+            smell_radius = ANIMAL_SMELL_RADIUS.get(adult_type, 15.0)
+            for adult in self.animals:
+                if adult.get("type") != adult_type or adult.get("hunger", 0) < fullness_target:
                     continue
-                # Spread babies anywhere in a wide radius (not just near player)
-                angle = random.uniform(0, 2 * math.pi)
-                r = random.uniform(3, FOG_RADIUS * 2)
-                gx = player.x + r * math.cos(angle)
-                gy = player.y + r * math.sin(angle)
-                if biome_at(gx, gy) != "Forest":
+                for mate in self.animals:
+                    if mate is adult or mate.get("type") != adult_type or mate.get("hunger", 0) < fullness_target:
+                        continue
+                    if math.hypot(adult["x"] - mate["x"], adult["y"] - mate["y"]) > smell_radius:
+                        continue
+                    if adult_type == "rabbit" and adult.get("burrow_pos") != mate.get("burrow_pos"):
+                        continue
+                    pairs.append((adult, mate))
+                    break
+            if not pairs or random.random() > 0.75:
+                continue
+            adult, mate = random.choice(pairs)
+            adef = ANIMAL_DEFS[young_type]
+            self.animals.append({
+                "type": young_type, "x": adult["x"] + random.uniform(-0.5, 0.5),
+                "y": adult["y"] + random.uniform(-0.5, 0.5), "hp": adef["hp"],
+                "max_hp": adef["hp"], "life": adef["hp"], "max_life": adef["hp"],
+                "fleeing": False, "last_move": now, "birth_time": now,
+                "interest_until": now + 3.0 * GAME_HOUR, "hunger": 100.0,
+                "thirst": 100.0, "energy": 100.0, "last_forage": now,
+                "burrow_pos": adult.get("burrow_pos"),
+                "needs_parent_food": adult_type == "rabbit",
+            })
+            adult["hunger"] = max(0.0, adult.get("hunger", 0.0) - 15.0)
+            mate["hunger"] = max(0.0, mate.get("hunger", 0.0) - 15.0)
+        adults = [a for a in self.animals if a.get("type") == "wolf" and a.get("hp", 0) > 0]
+        young = [a for a in self.animals if a.get("type") == "young_wolf" and a.get("hp", 0) > 0]
+        if len(adults) >= 2 and len(adults) + len(young) < ANIMAL_POPULATION_CAPS["wolf"]:
+            for wolf in adults:
+                if now < wolf.get("breed_retry_at", 0.0) or wolf.get("has_pup", False):
                     continue
-                adef = ANIMAL_DEFS[young_type]
-                self.animals.append({
-                    "type": young_type,
-                    "x": gx + random.uniform(-2, 2),
-                    "y": gy + random.uniform(-2, 2),
-                    "hp": adef["hp"],
-                    "max_hp": adef["hp"],
-                    "fleeing": False,
-                    "last_move": now,
-                    "birth_time": now,
-                })
+                mate = next((other for other in adults
+                             if other is not wolf and other.get("pack_id") == wolf.get("pack_id")
+                             and not other.get("has_pup", False)
+                             and math.hypot(other["x"] - wolf["x"], other["y"] - wolf["y"]) <= 12), None)
+                if mate is None:
+                    continue
+                if random.random() > 0.80:
+                    wolf["breed_retry_at"] = mate["breed_retry_at"] = now + 2 * DAY_NIGHT_CYCLE
+                    continue
+                adef = ANIMAL_DEFS["young_wolf"]
+                pup = {"type":"young_wolf", "x":wolf["x"] + random.uniform(-1, 1),
+                       "y":wolf["y"] + random.uniform(-1, 1), "hp":adef["hp"],
+                       "max_hp":adef["hp"], "life":adef["hp"], "max_life":adef["hp"],
+                       "fleeing":False, "last_move":now, "birth_time":now,
+                       "interest_until":now + 3 * GAME_HOUR, "hunger":100.0,
+                       "thirst":100.0, "energy":100.0, "last_forage":now,
+                       "pack_id":wolf.get("pack_id"), **wolf_stats(young=True)}
+                self.animals.append(pup)
+                wolf["has_pup"] = mate["has_pup"] = True
+                break
         self.arctic_weather_type = "neutral"
 
     def _hash(self, x, y, pos_biome=None):
@@ -8873,11 +9205,11 @@ class World:
 
         # Handle other animal types (salmon, seal, penguin in Arctic; these keep old spawn_rate logic)
         for atype, adef in ANIMAL_DEFS.items():
-            if adef["biome"] == "Forest": continue  # Forest animals are handled above
+            if adef["biome"] == "Forest" and atype != "wolf": continue  # Other Forest animals are seeded above
             if beginner_mode and atype in ("grot", "grot_leader"):
                 continue
             if not biome_matches(adef, cur_biome): continue
-            max_count = 3 if atype == "grot" else 2
+            max_count = 3 if atype == "grot" else (20 if atype == "wolf" else 2)
             if counts.get(atype,0) >= max_count: continue
             if atype == "grot_leader":
                 continue  # grot_leaders are promoted from grots at spawn time (20% chance)
@@ -8914,6 +9246,7 @@ class World:
                 grot_stats_data = grot_stats(player.hidden_xp, grace=grace_flag)
             if not can_spawn_here(gx, gy):
                 continue
+            pack_id = f"pack-{int(now * 1000)}-{random.randint(0, 9999)}" if atype == "wolf" else None
             for _ in range(group_size):
                 ax = gx + random.uniform(-2, 2)
                 ay = gy + random.uniform(-2, 2)
@@ -8922,6 +9255,17 @@ class World:
                 animal_entry = {
                     "type": atype, "x": ax, "y": ay,
                     "fleeing": False, "last_move": now,
+                    # Interest tracking: how long the grot stays focused on the player.
+                    # When not actively damaging the player, interest decays and the
+                    # grot wanders off after a few turns.
+                    "interest_until": now + 3.0 * GAME_HOUR,
+                    # Survival counters for grots/monsters within 100 tiles.
+                    "hunger": 100.0,
+                    "thirst": 100.0,
+                    "energy": 100.0,
+                    "last_forage": now,
+                    "life": 1,
+                    "max_life": 1,
                 }
                 if atype == "grot":
                     # 1-in-5 chance to promote a grot to grot_leader
@@ -8948,6 +9292,12 @@ class World:
                     animal_entry.update({
                         "hp": adef["hp"], "max_hp": adef["hp"],
                     })
+                    if atype == "wolf":
+                        diseased = group_size == 1 and random.random() < 0.35
+                        animal_entry.update(wolf_stats(diseased=diseased))
+                        animal_entry["max_hp"] = animal_entry["hp"]
+                        animal_entry["pack_id"] = pack_id
+                        animal_entry["diseased"] = diseased
                 self.animals.append(animal_entry)
                 spawned = True
 
@@ -8974,34 +9324,288 @@ class World:
                 a["type"] = "antelope"
                 a["hp"] = ANIMAL_DEFS["antelope"]["hp"]
                 a["max_hp"] = ANIMAL_DEFS["antelope"]["hp"]
+            elif a["type"] == "young_wolf" and now - a.get("birth_time", now) >= 5 * DAY_NIGHT_CYCLE:
+                a["type"] = "wolf"
+                a.update(wolf_stats())
+                a["max_hp"] = a["hp"]
+                for parent in self.animals:
+                    if parent.get("pack_id") == a.get("pack_id"):
+                        parent["has_pup"] = False
 
     def move_animals(self, player):
         now = time.time()
         to_remove = []
         for i, a in enumerate(self.animals):
+            if a.get("hp", 0) <= 0:
+                to_remove.append(i)
+                continue
+            a.setdefault("life", a.get("hp", a.get("max_hp", 1)))
+            a["life"] = a.get("hp", a.get("life", 1))
+            a.setdefault("max_life", a.get("max_hp", a.get("hp", 1)))
+            a.setdefault("hunger", 100.0)
+            a.setdefault("thirst", 100.0)
+            a.setdefault("energy", 100.0)
+
             adef = ANIMAL_DEFS.get(a["type"], {})
             dt = now - a.get("last_move", now)
             dist_to_player = math.hypot(a["x"]-player.x, a["y"]-player.y)
-            # When an animal is on-screen (near the player) update it very
-            # frequently and move it in small ~0.1-tile fractions so it glides
-            # smoothly instead of teleporting/"jumping" between renders.
             near_player = dist_to_player <= FOG_RADIUS
             step_thresh = 0.08 if near_player else 0.5
             if dt < step_thresh: continue
             a["last_move"] = now
-            # Cap dt so a long modal screen (tutorial, menu, spear-throw lesson)
-            # can't translate into a giant teleport "jump" when control returns —
-            # e.g. the deer should not bolt across the map while you read a tutorial.
             dt = min(dt, 0.6)
             speed_cpm = a.get("speed_cpm", adef.get("speed_cpm", 10))
             real_speed = speed_cpm * dt / 30.0
+            if a.get("type") in ANIMAL_HUNGER_RATE:
+                real_speed *= max(0.20, min(1.0, a.get("hunger", 100.0) / 100.0))
             if near_player:
-                real_speed = min(real_speed, 0.1)   # smooth fractional movement
+                real_speed = min(real_speed, 0.1)
+
+            # Per-creature life/survival: creatures need to eat, drink and avoid hazards while in range.
+            if dist_to_player <= 100.0 or a.get("type") in ("grot", "grot_leader"):
+                _animal_disease_tick(a, dt, now)
+                hunger_rate = ANIMAL_HUNGER_RATE.get(a.get("type"), 1.25 if a.get("type") in ("grot", "grot_leader") else 0.04)
+                a["hunger"] = max(0.0, a.get("hunger", 100.0) - dt * hunger_rate)
+                a["fullness"] = a["hunger"]
+                a["thirst"] = max(0.0, a.get("thirst", 100.0) - dt * (1.5 if a.get("type") in ("grot", "grot_leader") else 0.8))
+                a["energy"] = max(0.0, a.get("energy", 100.0) - dt * (0.7 if a.get("type") in ("grot", "grot_leader") else 0.45))
+                if a.get("hunger", 100.0) <= 0 or a.get("thirst", 100.0) <= 0:
+                    starvation_damage = a.get("max_hp", 1) / max(1.0, DAY_LENGTH)
+                    a["hp"] = max(0.0, a.get("hp", a.get("max_hp", 1)) - dt * (6.0 if a.get("type") in ("grot", "grot_leader") else starvation_damage))
+                if biome_at(a["x"], a["y"]) == "Arctic" and a.get("type") not in ("seal", "penguin"):
+                    a["hp"] = max(0.0, a.get("hp", a.get("max_hp", 1)) - dt * 1.5)
+                for cx, cy in ((int(round(a["x"])), int(round(a["y"]))),):
+                    c = self._load(cx, cy)
+                    if c and c.get("real_item") in ("fire", "ash"):
+                        a["hp"] = max(0.0, a.get("hp", a.get("max_hp", 1)) - dt * 6.0)
+                        a["fleeing"] = True
+
+                target = None; target_d = float('inf'); target_score = float('inf')
+                is_rabbit = a.get("type") in ("rabbit", "young_rabbit")
+                fullness_target = ANIMAL_FULLNESS_TARGET.get(a.get("type"), 75.0)
+                if a.get("hunger", 0.0) >= fullness_target:
+                    base_type = _animal_base_type(a.get("type", ""))
+                    smell_radius = ANIMAL_SMELL_RADIUS.get(a.get("type"), 15.0)
+                    mate = min((b for b in self.animals
+                                if b is not a and _animal_base_type(b.get("type", "")) == base_type
+                                and b.get("hp", 0) > 0
+                                and b.get("hunger", 0.0) >= fullness_target),
+                               key=lambda b: math.hypot(b["x"] - a["x"], b["y"] - a["y"]), default=None)
+                    if mate is not None:
+                        mate_dist = math.hypot(mate["x"] - a["x"], mate["y"] - a["y"])
+                        if mate_dist <= smell_radius and mate_dist > 0.8:
+                            a["mate_target"] = mate.get("id", id(mate))
+                            a["x"] += (mate["x"] - a["x"]) / mate_dist * min(real_speed * 1.5, mate_dist)
+                            a["y"] += (mate["y"] - a["y"]) / mate_dist * min(real_speed * 1.5, mate_dist)
+                            continue
+                if is_rabbit and a.get("burrow_pos") in self.clusters and a.get("hunger", 0) >= 30:
+                    if self.clusters[a["burrow_pos"]].get("real_item") == RABBIT_HOLE:
+                        target = a["burrow_pos"]
+                        target_d = math.hypot(target[0] - a["x"], target[1] - a["y"])
+                        target_score = -1
+                if is_rabbit and a.get("type") == "rabbit" and a.get("hunger", 0) >= 70 and target is None:
+                    target = next((pos for pos, cl in self.clusters.items()
+                                   if cl.get("real_item") == RABBIT_HOLE
+                                   and math.hypot(pos[0] - a["x"], pos[1] - a["y"]) <= 30), None)
+                    if target is not None:
+                        target_d = math.hypot(target[0] - a["x"], target[1] - a["y"])
+                        target_score = -1
+                if is_rabbit and a.get("type") == "rabbit" and a.get("hunger", 0) >= 70 and target is None:
+                    target = next((pos for pos, cl in self.clusters.items()
+                                   if cl.get("real_item") == "dirt"
+                                   and math.hypot(pos[0] - a["x"], pos[1] - a["y"]) <= 30), None)
+                    if target is not None:
+                        target_d = math.hypot(target[0] - a["x"], target[1] - a["y"])
+                        target_score = -0.5
+                if target is None and a.get("hunger", 0.0) < fullness_target and a.get("type") not in ("cat", "young_cat", "grot", "grot_leader"):
+                    for pos, cl in self.clusters.items():
+                        if cl is None or cl.get("qty", 0) <= 0:
+                            continue
+                        item = cl.get("real_item")
+                        if item not in ANIMAL_FOOD_ITEMS:
+                            continue
+                        d = math.hypot(pos[0] - a["x"], pos[1] - a["y"])
+                        score = d / animal_food_preference(a["type"], item)
+                        if score < target_score:
+                            target = pos; target_d = d; target_score = score
+                if target is not None and target_d <= 22.0:
+                        dx = target[0] - a["x"]; dy = target[1] - a["y"]
+                        if target_d > 0.6:
+                            nd = max(0.1, target_d)
+                            a["x"] += (dx / nd) * min(real_speed * 2.5, target_d)
+                            a["y"] += (dy / nd) * min(real_speed * 2.5, target_d)
+                        else:
+                            cl = self.clusters.get(target)
+                            if cl and cl.get("real_item") == "dirt" and is_rabbit and a.get("type") == "rabbit":
+                                cl["real_item"] = RABBIT_HOLE
+                                cl["name"] = "🕳️ Rabbit Burrow"
+                                cl["category"] = "habitat"
+                                cl["qty"] = 1
+                                cl["is_identified"] = True
+                                cl.setdefault("meta", {})["rabbit_hole"] = True
+                                a["burrow_pos"] = target
+                            elif cl and cl.get("real_item") == RABBIT_HOLE:
+                                a["burrow_pos"] = target
+                            elif cl and cl.get("qty", 0) > 0:
+                                intake = ANIMAL_FORAGE_RATE.get(a.get("type"), 0.25)
+                                a["forage_progress"] = a.get("forage_progress", 0.0) + dt * intake
+                                portions = int(a["forage_progress"])
+                                if portions:
+                                    eaten = min(portions, int(cl.get("qty", 0)))
+                                    cl["qty"] = max(0, cl.get("qty", 0) - eaten)
+                                    a["forage_progress"] -= eaten
+                                    a["hunger"] = min(100.0, a.get("hunger", 100.0) + eaten * 25.0)
+                                    a["fullness"] = a["hunger"]
+                                    a["thirst"] = min(100.0, a.get("thirst", 100.0) + eaten * 8.0)
+                                    a["energy"] = min(100.0, a.get("energy", 100.0) + eaten * 5.0)
+                                    _animal_contract_disease(a, "water" if item in ("water", "fresh_water", "dirty_water", "arctic_water", "snow") else "food")
+                                    if is_rabbit and a.get("type") == "rabbit" and a.get("burrow_pos") == target:
+                                        for baby in self.animals:
+                                            if baby.get("burrow_pos") == target and baby.get("needs_parent_food"):
+                                                baby["hunger"] = min(100.0, baby.get("hunger", 0.0) + eaten * 30.0)
+                                    a["last_forage"] = now
+                                    if cl.get("qty", 0) <= 0:
+                                        self.depleted.add(target)
+                                        self.clusters.pop(target, None)
+
+                if is_rabbit and a.get("type") == "rabbit" and a.get("hunger", 0) >= 70:
+                    for pos, cl in list(self.clusters.items()):
+                        if cl.get("real_item") == "dirt" and math.hypot(pos[0] - a["x"], pos[1] - a["y"]) <= 8:
+                            cl["real_item"] = RABBIT_HOLE
+                            cl["name"] = "🕳️ Rabbit Burrow"
+                            cl["category"] = "habitat"
+                            cl["qty"] = 1
+                            cl["is_identified"] = True
+                            cl.setdefault("meta", {})["rabbit_hole"] = True
+                            a["burrow_pos"] = pos
+                            break
+
+                if a.get("needs_parent_food") and now - a.get("birth_time", now) < 3 * 24 * GAME_HOUR:
+                    a["hunger"] = max(0.0, a.get("hunger", 100.0) - dt * ANIMAL_HUNGER_RATE["young_rabbit"])
+
+            if a.get("hp", 0) <= 0:
+                to_remove.append(i)
+                continue
+
+            # Wolves hunt as a pack. They prefer the largest meat-bearing prey,
+            # surround it, and only commit when the expected exchange is good.
+            if a["type"] in ("wolf", "young_wolf"):
+                if a["type"] == "young_wolf":
+                    a["x"] += random.uniform(-1, 1) * real_speed * 0.1
+                    a["y"] += random.uniform(-1, 1) * real_speed * 0.1
+                    continue
+                pack = [b for b in self.animals if b.get("type") == "wolf"
+                        and b.get("hp", 0) > 0 and b.get("pack_id") == a.get("pack_id")]
+                candidates = [b for b in self.animals if b is not a and b.get("hp", 0) > 0
+                              and b.get("type") not in ("wolf", "young_wolf", "cat", "young_cat")
+                            and (ANIMAL_DEFS.get(b.get("type", ""), {}).get("loot", {}).get("meat", 0) > 0
+                                or b.get("type") in ("grot", "grot_leader"))
+                              and math.hypot(b["x"] - a["x"], b["y"] - a["y"]) <= a.get("vision_max", 10)]
+                target = max(candidates, key=lambda b: (
+                    ANIMAL_SIZE.get(b.get("type", ""), 1),
+                    -math.hypot(b["x"] - a["x"], b["y"] - a["y"])), default=None)
+                if target is not None:
+                    target_dist = math.hypot(target["x"] - a["x"], target["y"] - a["y"])
+                    attackers = max(1, len(pack))
+                    expected_damage = sum(max(1, w.get("atk", 3) - target.get("def", 0) // 2) for w in pack)
+                    expected_loss = max(1, target.get("atk", 0))
+                    if target_dist <= 1.2:
+                        if target.get("type") == "rabbit" and random.random() < 0.10:
+                            target["fleeing"] = True
+                            target["_threat_pos"] = (a["x"], a["y"])
+                            continue
+                        if target.get("type") == "deer" and random.random() < 0.05:
+                            target["hp"] = max(1, target.get("hp", 1) - 20)
+                            target["fleeing"] = True
+                            continue
+                        if target.get("type") == "grot" and expected_loss >= expected_damage / max(1, attackers):
+                            a["fleeing"] = True
+                            continue
+                        target["hp"] = max(0.0, target.get("hp", 1) - max(1, a.get("atk", 3)))
+                        a["energy"] = max(0.0, a.get("energy", 100.0) - 2.0)
+                        if target["hp"] <= 0:
+                            a["hunger"] = min(100.0, a.get("hunger", 0.0) + animal_meat_yield(target) * 8.0)
+                            try:
+                                target_index = self.animals.index(target)
+                                to_remove.append(target_index)
+                            except ValueError:
+                                pass
+                    else:
+                        # Offset each pack member around the target to form a ring.
+                        slot = pack.index(a) if a in pack else 0
+                        angle = (2 * math.pi * slot / max(1, len(pack))) + now * 0.03
+                        ring_x = target["x"] + math.cos(angle) * 1.1
+                        ring_y = target["y"] + math.sin(angle) * 1.1
+                        ring_dist = math.hypot(ring_x - a["x"], ring_y - a["y"])
+                        if ring_dist > 0.2:
+                            a["x"] += (ring_x - a["x"]) / ring_dist * min(real_speed * 0.35, ring_dist)
+                            a["y"] += (ring_y - a["y"]) / ring_dist * min(real_speed * 0.35, ring_dist)
+                    continue
+                if dist_to_player <= a.get("vision_max", 10):
+                    pack_power = sum(max(1, w.get("atk", 3)) for w in pack)
+                    if pack_power >= player.health and len(pack) > 1:
+                        if dist_to_player > 1.0:
+                            slot = pack.index(a) if a in pack else 0
+                            angle = (2 * math.pi * slot / max(1, len(pack))) + now * 0.03
+                            px = player.x + math.cos(angle) * 1.1
+                            py = player.y + math.sin(angle) * 1.1
+                            d_player = math.hypot(px - a["x"], py - a["y"])
+                            if d_player > 0.2:
+                                a["x"] += (px - a["x"]) / d_player * min(real_speed * 0.35, d_player)
+                                a["y"] += (py - a["y"]) / d_player * min(real_speed * 0.35, d_player)
+                        elif now - a.get("_last_player_attack", 0.0) >= 2.0:
+                            a["_last_player_attack"] = now
+                            player.note_damage_cause("Wolf pack attack")
+                            player.health = max(0, player.health - max(1, a.get("atk", 3)))
+                    continue
+                # A lone wolf remains mobile and may investigate the player.
+                if len(pack) == 1 and dist_to_player <= a.get("vision_max", 10):
+                    if dist_to_player > 1.0:
+                        a["x"] += (player.x - a["x"]) / max(0.1, dist_to_player) * real_speed
+                        a["y"] += (player.y - a["y"]) / max(0.1, dist_to_player) * real_speed
+                    elif now - a.get("_last_player_attack", 0.0) >= 2.0:
+                        a["_last_player_attack"] = now
+                        player.note_damage_cause("Wolf attack")
+                        player.health = max(0, player.health - max(1, a.get("atk", 3)))
+                continue
 
             # Grots: aggressor behavior — approach player, hunt animals, flee at 50% HP in small groups
             if a["type"] in ("grot", "grot_leader"):
                 nearby_grots = sum(1 for b in self.animals if b["type"] in ("grot", "grot_leader") and math.hypot(b["x"]-a["x"],b["y"]-a["y"]) <= 5)
+                for b in self.animals:
+                    if b is a or b.get("type") not in ("grot", "grot_leader") or b.get("hp", 0) <= 0:
+                        continue
+                    bd = math.hypot(b["x"]-a["x"], b["y"]-a["y"])
+                    if bd <= 1.5 and a.get("hp", 0) > 0 and b.get("hp", 0) > 0:
+                        dmg = max(1, int((a.get("atk", 2) + a.get("def", 0)) / 2))
+                        b["hp"] = max(0.0, b.get("hp", 0) - dmg)
+                        a["hp"] = max(0.0, a.get("hp", 0) - max(1, int((b.get("atk", 2) + b.get("def", 0)) / 3)))
+                        a["fleeing"] = a.get("hp", 0) <= a.get("max_hp", 1) * 0.5 or nearby_grots <= 1
+                        if b.get("hp", 0) <= 0:
+                            b["hp"] = 0
+                            b["life"] = 0
+                            if b.get("type") == "grot_leader":
+                                a["hp"] = min(a.get("max_hp", a.get("hp", 1)), a.get("hp", 0) + 2)
+                        if a.get("hp", 0) <= 0:
+                            to_remove.append(i)
+                            break
+
                 max_hp = a.get("max_hp", 5)
+                # Interest tracking: grots lose interest in the player if they haven't
+                # been actively damaging them recently.
+                # 3 turns (game hours) of no damage → lose interest.
+                # If player has no weapon: 2 turns, unless grot is ≤5 coords away.
+                if not a.get("_interest_started"):
+                    a["_interest_started"] = now
+                    a["_last_damage_turn"] = now
+                player_has_weapon = bool(getattr(player, "spear_type", None) and getattr(player, "spear_dur", 0) > 0)
+                interest_decay = 3.0 * GAME_HOUR
+                if not player_has_weapon and dist_to_player > 5.0:
+                    interest_decay = 2.0 * GAME_HOUR
+                if now - a.get("_last_damage_turn", now) > interest_decay:
+                    # Grot loses interest — wander off instead of chasing
+                    a["fleeing"] = True
+                    a["_lost_interest"] = True
                 # Lone grot below half HP: flee outright (no retaliation), with grace period.
                 if nearby_grots <= 1 and a["hp"] <= max_hp * 0.5:
                     a["fleeing"] = True
@@ -9249,6 +9853,25 @@ class World:
                 a["y"] += random.uniform(-1,1) * real_speed * 0.15
                 continue
             # ---- Non-grot animal (prey) AI ----
+            if a.get("type") == "penguin":
+                fish = min((b for b in self.animals
+                            if b is not a and b.get("type") == "salmon" and b.get("hp", 0) > 0),
+                           key=lambda b: math.hypot(b["x"] - a["x"], b["y"] - a["y"]),
+                           default=None)
+                if fish:
+                    fish_dist = math.hypot(fish["x"] - a["x"], fish["y"] - a["y"])
+                    if fish_dist <= 1.2:
+                        fish["hp"] = 0
+                        a["hunger"] = min(100.0, a.get("hunger", 0.0) + 45.0)
+                        try:
+                            to_remove.append(self.animals.index(fish))
+                        except ValueError:
+                            pass
+                    elif fish_dist <= 30.0:
+                        a["_hunting_fish"] = True
+                        a["x"] += (fish["x"] - a["x"]) / fish_dist * real_speed * 1.8
+                        a["y"] += (fish["y"] - a["y"]) / fish_dist * real_speed * 1.8
+                        continue
             # Find nearest grot threat; prey are afraid of grots too.
             nearest_grot = None
             nearest_grot_dist = float('inf')
@@ -9259,6 +9882,18 @@ class World:
                 if gd < nearest_grot_dist:
                     nearest_grot_dist = gd
                     nearest_grot = g
+            if not a.get("fleeing"):
+                own_size = ANIMAL_SIZE.get(a.get("type"), 2)
+                larger = min((b for b in self.animals
+                              if b is not a and b.get("hp", 0) > 0
+                              and ANIMAL_SIZE.get(b.get("type"), own_size) > own_size),
+                             key=lambda b: math.hypot(b["x"] - a["x"], b["y"] - a["y"]),
+                             default=None)
+                if larger:
+                    larger_dist = math.hypot(larger["x"] - a["x"], larger["y"] - a["y"])
+                    if larger_dist <= 6.0:
+                        a["fleeing"] = True
+                        a["_threat_pos"] = (larger["x"], larger["y"])
             if not a.get("fleeing"):
                 vm = a.get("vision_max", adef.get("vision_max", 5))
                 vp = a.get("vision_peak", adef.get("vision_peak", 3))
@@ -9298,6 +9933,8 @@ class World:
         for i in reversed(to_remove): self.animals.pop(i)
 
     def update_animal_survival(self):
+        """Keep this hook for compatibility; hunger death is handled per animal."""
+        return
         """Check for overpopulation and starvation in 3x3 grid cells.
         - If >3 animals in a 3x3 cell: 50% die per 30 game minutes
         - If avg cluster qty <10 in a 3x3 cell: 50% die per 30 game minutes
@@ -9349,8 +9986,13 @@ class World:
             avg_qty = sum(c.get("qty", 0) for c in clusters_in_cell) / len(clusters_in_cell) if clusters_in_cell else 0
 
             # Apply death mechanics
-            overpopulated = animal_count > 5
+            overpopulated = animal_count > ANIMAL_CELL_CAP
             starving = avg_qty < 5
+
+            if overpopulated:
+                excess = animal_count - ANIMAL_CELL_CAP
+                animals_to_remove.extend(random.sample(animals_in_cell, excess))
+                animals_in_cell = [a for a in animals_in_cell if a not in animals_to_remove]
 
             if overpopulated or starving:
                 for animal in animals_in_cell:
@@ -9358,11 +10000,15 @@ class World:
                         animals_to_remove.append(animal)
 
         # Remove dead animals — drop meat/loot on the ground
+        seen = set()
         for animal in animals_to_remove:
+            if id(animal) in seen:
+                continue
+            seen.add(id(animal))
             try:
                 self.animals.remove(animal)
                 loot = ANIMAL_DEFS.get(animal.get('type',''), {}).get('loot', {})
-                meat_qty = loot.get('meat', 0) + loot.get('bone', 0) // 2
+                meat_qty = animal_meat_yield(animal) + loot.get('bone', 0) // 2
                 if meat_qty > 0:
                     drop_x = int(round(animal['x'])); drop_y = int(round(animal['y']))
                     drop_pos = (drop_x, drop_y)
@@ -9374,12 +10020,15 @@ class World:
                             'name': 'Raw Game', 'real_item': 'meat', 'category': 'food',
                             'is_identified': True, 'inspection_attempts': 0,
                             'pos': [drop_x, drop_y], 'qty': meat_qty,
-                            'meta': {'item': 'meat', 'regrows': False}
+                            'meta': {'item': 'meat', 'regrows': False,
+                                     'animal_diseases': list(animal.get('diseases', {}))}
                         }
             except ValueError:
                 pass
 
     def deplete_resources_by_animals(self):
+        """Resource loss is caused only by an animal's active forage action."""
+        return
         """Reduce nearby clusters based on animal pressure in each 3x3 cell."""
         now = time.time()
         if not hasattr(self, 'last_resource_depletion'):
@@ -9491,6 +10140,72 @@ def roll_mystery_mushroom():
     }
 
 
+_grot_video_process = None
+_rain_video_process = None
+
+
+def _play_asset_sound(stem, volume=1.0):
+    """Play assets/<stem>.<ogg|wav|mp3|flac> on a free channel (keeps music playing)."""
+    path = resolve_exact_asset(stem)
+    if not path:
+        return
+    try:
+        if PYGAME_AVAILABLE and pygame is not None:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(SOUND_SAMPLE_RATE, -16, 2, SOUND_BUFFER_SIZE)
+            snd = pygame.mixer.Sound(str(path))
+            try:
+                snd.set_volume(volume)
+            except Exception:
+                pass
+            ch = pygame.mixer.find_channel(True)
+            if ch is not None:
+                ch.play(snd)
+            else:
+                snd.play()
+            return
+    except Exception:
+        pass
+    try:
+        SoundManager._play_external_audio(path)
+    except Exception:
+        pass
+
+
+def _play_asset_video(video_name, proc_name):
+    """Launch the bundled cats_1.py player on assets/<video_name>."""
+    video_path = _assets_dir() / video_name
+    player_script = _assets_dir() / "cats_1.py"
+    if not video_path.is_file() or not player_script.is_file():
+        return
+    old = globals().get(proc_name)
+    try:
+        if old is not None and old.poll() is None:
+            old.terminate()
+    except Exception:
+        pass
+    try:
+        globals()[proc_name] = subprocess.Popen(
+            [sys.executable, str(player_script), str(video_path)],
+            cwd=str(player_script.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        globals()[proc_name] = None
+
+
+def _play_grot_video():
+    # cats.mp4 always comes with the lightning crack.
+    _play_asset_sound("lightning")
+    _play_asset_video("cats.mp4", "_grot_video_process")
+
+
+def _play_rain_video(intensity):
+    """Rain just started: roll rain.mp4 and the matching rain loop."""
+    _play_asset_sound("heavy_rain" if intensity >= 4 else "light_rain")
+    _play_asset_video("rain.mp4", "_rain_video_process")
+
+
 def resolve_animal_kill(player, world, target, msg):
     # Grots that caught prey drop the carried loot too
     try:
@@ -9502,6 +10217,8 @@ def resolve_animal_kill(player, world, target, msg):
     except Exception:
         pass
     hunt_type = target["type"]
+    if hunt_type == "grot":
+        _play_grot_video()
     if hunt_type == "grot":
         loot_items = {}
         if player.hidden_xp < 40:
@@ -9527,8 +10244,18 @@ def resolve_animal_kill(player, world, target, msg):
     else:
         loot = ANIMAL_DEFS.get(hunt_type, {}).get("loot", {})
         for item, qty in loot.items():
+            if item == "meat":
+                qty = animal_meat_yield(target)
             player.inventory[item] = player.inventory.get(item, 0) + qty
+        if hunt_type == "wolf" and random.random() < 0.50:
+            player.inventory["wolf_tooth"] = player.inventory.get("wolf_tooth", 0) + 1
+            loot = dict(loot)
+            loot["wolf_tooth"] = 1
         loot_str = ", ".join(f"{q}x {k}" for k, q in loot.items()) or "no loot"
+        if target.get("diseased"):
+            player._last_meat_disease_risk = 0.50
+        elif target.get("diseases"):
+            player._last_meat_diseases = list(target["diseases"])
     # Animal kill creates a mini-cluster at the nearest empty spot
     try:
         ax, ay = int(target.get("x",0)), int(target.get("y",0))
@@ -10970,7 +11697,7 @@ def enter_house_mode(term, player, world, house, weather, msg_out):
         add_msg("🎮 You turn on the gaming console.")
 
         def _practice_animal_pool(biome):
-            forest_prey = ["rabbit", "young_rabbit", "squirrel", "young_squirrel", "deer", "young_deer", "antelope", "young_antelope"]
+            forest_prey = ["rabbit", "young_rabbit", "squirrel", "young_squirrel", "deer", "young_deer", "antelope", "young_antelope", "wolf"]
             arctic_prey = ["penguin", "seal", "salmon"]
             prey = forest_prey + (arctic_prey if biome == "Arctic" else [])
             return {
@@ -12390,7 +13117,7 @@ def run_grid_mode(term, player, world, initial_targets, msg_out=None):
 
         live = [e for e in entities if e.get("hp",0)>0]
         hostile_live = [e for e in live if e.get("atk",0)>0 or e.get("type") in ("grot","grot_leader")]
-        if not hostile_live and not initial_targets:
+        if not hostile_live:
             add_msg("✅ No more threats. Exiting grid mode.")
             break
 
@@ -13880,9 +14607,9 @@ def pick_save():
         _p(f"  {new_idx + 1}. 📜  Credits", "IDX:%d" % (new_idx + 1))
         _p("  0.  ❌  Exit", "IDX:0")
         if total_pages > 1:
-            _p("  ↑/↓ arrow keys to flip pages   d<n> to delete   🖱️ click to select")
+            _p("  ↑/↓ arrow keys to flip pages   d<n> to delete   🖱️ Click to select, or type number next to option, then click enter.")
         else:
-            _p("  d<n> to delete a save (e.g. d1)   🖱️ click to select")
+            _p("  d<n> to delete a save (e.g. d1)   🖱️ Click to select, or type number next to option, then click enter.")
         _p("")
         prompt = f"  Choose: {buf}"
 
@@ -15440,17 +16167,17 @@ def main():
                     w = weather.update_hourly(world, player)
                     if w:
                         msg.append(w); msg = msg[-3:]
-                        if weather.lightning_hit or weather.tornado_hit:
-                            refresh()
-                            if weather.lightning_hit:
-                                for _ in range(3):
-                                    term.flash_white()
-                                if sound and sound.enabled:
-                                    sound.play_lightning()
-                            if weather.tornado_hit:
-                                term.flash_red()
-                                if sound and sound.enabled:
-                                    sound.play_tornado()
+                    if weather.lightning_hit or weather.tornado_hit:
+                        refresh()
+                        if weather.lightning_hit:
+                            for _ in range(3):
+                                term.flash_white()
+                            if sound:
+                                sound.play_lightning()
+                        if weather.tornado_hit and not weather.lightning_hit:
+                            term.flash_red()
+                            if sound and sound.enabled:
+                                sound.play_tornado()
                     # Weather-change tutorial: fire when current weather changes
                     cur_w = getattr(weather, "current", None)
                     prev_w = getattr(player, "_prev_weather_for_tutorial", None)
@@ -15568,6 +16295,7 @@ def main():
                     m, d = player.travel_to(dx, dy)
                     if d == -1: msg.append("😮‍💨 Exhausted!")
                     elif d > 0.01:
+                        world.spawn_animals_at_step(player)
                         cur_biome = biome_at(player.x, player.y)
                         if cur_biome != prev_biome:
                             if cur_biome == "Arctic":
@@ -17059,6 +17787,21 @@ def main():
                             if (not _beginner) and inv_key in UNCOOKED:
                                 if random.random() < 0.05:
                                     _infect_player(player, "food", msg)
+                                if inv_key in ("meat", "raw_game") and getattr(player, "_last_meat_diseases", None):
+                                    for _disease_id in player._last_meat_diseases:
+                                        if _disease_id in DISEASES:
+                                            _infect_player(player, "food", msg)
+                                    player._last_meat_diseases = []
+                            wolf_risk = getattr(player, "_last_meat_disease_risk", 0.0)
+                            cooked_meat = {"roasted_meat", "jerky", "thin_cut_meat", "thick_cut_meat",
+                                           "stuffed_thin_meat", "stuffed_thin_meat_berries",
+                                           "stuffed_thin_meat_honey", "stuffed_thin_meat_meat"}
+                            if (not _beginner) and wolf_risk and inv_key in ({"meat", "raw_game"} | cooked_meat):
+                                rolls = 2 if inv_key == "stuffed_thin_meat_meat" else 1
+                                for _ in range(rolls):
+                                    if random.random() < (wolf_risk if inv_key in ("meat", "raw_game") else 0.10):
+                                        _infect_player(player, "food", msg)
+                                player._last_meat_disease_risk = 0.0
                             # Mystery mushroom backfire → also infect; safe → 25% cure
                             if eff.get("risk") == "mystery_mushroom":
                                 if "_mm_backfire_marker" in msg[-3:]:

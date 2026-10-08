@@ -12,19 +12,6 @@ CHANGES v17: quest display active-only, plank quest checks inventory, first-nigh
 """
 
 import time, random, math, json, os, sys, select, signal, unicodedata, threading, io, re, subprocess
-
-# Deterministic multiscale planetary weather engine.  This supersedes random weather selection
-# while keeping the legacy effect/rendering system below for gameplay presentation.
-try:
-    from weather_engine import WeatherEngine, EngineConfig
-    from weather_engine.game_bridge import GameWeatherBridge
-    from weather_engine.effects import event_effects
-    HAVE_PHYSICAL_WEATHER = True
-except Exception:
-    WeatherEngine = None
-    EngineConfig = None
-    GameWeatherBridge = None
-    HAVE_PHYSICAL_WEATHER = False
 try:
     import tty, termios
     HAVE_TERMIOS = True
@@ -309,13 +296,12 @@ SIDEBAR_COMMANDS = [
     ("walk <x,y>",   "Auto-walk to exact world coordinates, e.g. 'walk 120,-40'."),
     ("move <dir>",   "Step one tile in a direction: move north / south / east / west."),
     # ── Combat ────────────────────────────────────────────────────────────
-    ("a / spear throw",  "Throw your spear; E is the close spear strike in live combat."),
-    ("t / dirt throw",  "Throw carried dirt as a growing dust cloud; G grabs dirt."),
+    ("attack / a",   "Strike the nearest animal with your equipped weapon."),
+    ("throw / t",    "Throw your spear at the nearest animal. Costs spear durability."),
     ("hunt <animal>","Track and hunt a species: rabbit, deer, seal, grot…"),
-    ("hunt … grid",  "Enter live simultaneous combat against the target."),
-    ("grid",         "Legacy alias for live combat against nearby animals."),
+    ("hunt … grid",  "Open tactical turn-based grid combat against the target."),
+    ("grid",         "Enter grid combat mode against whatever is engaging you."),
     ("block",        "Grid combat: raise your shield and absorb the next hit."),
-    ("f / punch bam", "Grid combat: spend 80 energy to deal 10 damage to a fallen enemy on your square."),
     ("flee",         "Run from combat. Grots may chase — battle music keeps playing."),
     ("poison <item>","Coat your weapon with a poisonous item before striking."),
     # ── Resources ─────────────────────────────────────────────────────────
@@ -4416,7 +4402,6 @@ BIOME_RESOURCES = {
         "🕷️ Venomous Spider": {"item": "venom_sac",  "type": "material", "hazard": True,  "regrows": True,       "hazard_key": "venomous spider"},
         "🌾 Fibergrass Patch":{"item": "fibergrass", "type": "material", "regrows": True,  "hazard_key": None},
         "🌿 Catnip Cluster":  {"item": "catnip",     "type": "material", "regrows": True,  "hazard_key": None, "rare": True},
-        "🟫 Dirt Patch":      {"item": "dirt",       "type": "material", "regrows": False, "hazard_key": None},
     },
     "Arctic": {
         "❄️ Snow Patch":        {"item": "snow",             "type": "material",   "regrows": True,  "hazard_key": None},
@@ -4729,10 +4714,10 @@ HELP_PAGES = {
     "1. 🎮 Basic Controls": """🎮 BASIC CONTROLS
 ⬆️⬇️⬅️➡️  Arrow keys      : Move 1 tile (costs 0.5⚡). BLOCKED while crafting, gathering all, or resting!
 🚶 walk <name>     : Auto-pathfind to a named resource/cluster
-🏹 hunt <animal>   : Hunt an animal. Add 'throw' for the spear aim minigame, or 'grid' for live combat.
+🏹 hunt <animal>   : Hunt an animal. Add 'throw' to throw your spear, or 'grid' for tactical combat.
                     e.g. 'hunt rabbit', 'hunt seal throw', 'hunt deer grid'
-⚔️ LIVE COMBAT      : No spear required. Arrows move, G=grab dirt, T=throw,
-                    S=punch, I=kick, E=spear stab, A=spear throw, H=help.
+🗡️ attack / a      : Strike nearest animal within 2 tiles with equipped spear
+🗡️ throw / t       : Throw spear at nearest animal
 ☠️ poison spear    : Coat your spear: next 4 strikes OR 1 throw deal double damage
 🪵 gather          : Collect resources at your current tile (-2⚡)
 🪵 gather all      : Auto-gather everything nearby (you can't act until it finishes)
@@ -4810,89 +4795,32 @@ rest — toggles resting on/off. Moving also cancels rest.
 At 0 Fatigue: gathering and most actions are BLOCKED.
 Use coffee (buy from shop, or brew: coffee_beans + water in furnace) for +25😴.
 """,
-    "5. 🗡️ Hunting & Weapons": """🗡️ HUNTING & LIVE COMBAT
-A spear is useful, but live combat does NOT require a weapon.
+    "5. 🗡️ Hunting & Weapons": """🗡️ HUNTING & WEAPONS
+Use a spear to hunt animals from close range or at a distance.
+Attack with:  a / attack      — melee strike within 2 tiles
+Throw with:  t / throw       — ranged attack, breaks the spear faster
 
-LIVE COMBAT CONTROLS
-  Arrows : move in real time; energy drains as you move.
-  G      : grab up to 10 dirt on a dirt patch.
-  T      : throw carried dirt as an expanding, dodgeable dust cloud.
-    S      : punch within 1.5 coordinates (25 energy).
-    I      : kick within 1.5 coordinates (35 energy).
-  E      : spear stab.
-  A      : spear throw using the normal aim minigame.
-  H      : read the complete combat rules.
+Weapon notes:
+  • Light spears are fast and durable.
+  • Ice spears deal extra damage but break on throw.
+  • Poison your spear with: poison spear
 
-ENERGY CYCLES
-  Everyone spends combat energy at the same time.
-  When you hit 0, OR when every living enemy reaches 0, everyone refills
-  and a new combat cycle starts. Wolves have 130 energy; grots have 100.
+Hunting strategy:
+  1. Use walk to <name> or walk to (<x>,<y>) to reach animals.
+  2. Watch the scan list for nearby wildlife and distances.
+  3. Attack rabbits and squirrels at close range.
+  4. Throw at deer, antelope or fish for safer hits.
 
-DIRT
-  Dirt clouds move one coordinate every 0.5 seconds and can be dodged.
-  A direct hit blinds most enemies. Wolves keep smell but take 1.5× longer
-  to reach you while blinded. Ninjas are immune.
+Best prey:
+  • rabbit  — easiest early game meat.
+  • squirrel — fast and tricky.
+  • deer    — tougher, great reward for throwing.
+  • salmon  — Arctic water fish, hunt from shore.
 
-SPEAR
-  Use E for the live melee stab. Press S then T rapidly for the extended
-  spear move. A uses the existing spear-throw aim minigame.
-
-FALLEN ENEMIES
-  If you successfully punch or kick an enemy down, it stays on the floor
-  until the current combat cycle ends. It does not vanish. The side panel
-  tells you when an enemy is down so you can make your next move.
-
-""",
-    "7. ⚔️ Live Combat Rules": """⚔️ LIVE COMBAT RULES
-
-CORE LOOP
-  • Combat is simultaneous: you and enemies move/attack continuously.
-  • You start each cycle with 100 combat energy.
-  • Wolves have 130; grots have 100.
-  • If YOU hit 0 energy, the cycle immediately resets.
-  • If every living enemy hits 0 first, the cycle resets.
-  • On reset, everyone is restored to their maximum combat energy.
-
-MOVEMENT
-  • Arrow keys move one coordinate at a time.
-  • Movement itself costs combat energy.
-  • The combat map uses the same terrain/resource/building/animal emoji
-    used by graphics mode, so the fight shows the actual surroundings.
-
-DIRT
-  • G on a dirt patch grabs dirt, up to 10 pieces in your hands.
-  • T throws all carried dirt.
-  • The cloud moves 1 coordinate every 0.5 seconds and expands while moving.
-  • Dirt is deliberately easy to dodge; more dirt means more coverage.
-  • A direct hit blinds the target (except ninjas).
-  • Blinded wolves keep smell, know roughly where you are, and take 1.5×
-    as long to reach you. Blinded grots lose track of you.
-  • A dense hit during expansion can deal double dirt damage.
-
-UNARMED
-    • S = punch. 25 energy. Range 1.5. Enemy chooses fall or 2 damage.
-    • I = kick. 35 energy. Range 1.5. Enemy chooses fall, 40 energy to stay up,
-    or 5 damage.
-
-SPEAR
-  • E = live spear stab.
-  • A = spear throw + aim minigame.
-  • S then T rapidly = extended spear move.
-
-ENEMIES
-  • Wolves: pack behavior + teeth dig for 80 energy.
-  • Grots: teeth dig for 45 energy / 6 damage, punches, kicks, and up to
-    5 dirt carried for their own dust throws. Their AI aggressively spends
-    energy instead of waiting around.
-
-KNOCKDOWN
-  • Only successful player attacks can knock a grot/other enemy down in this
-    engine. An enemy does NOT knock itself down by attacking.
-  • A fallen enemy remains visible on its actual map tile for the rest of the
-    current cycle. The side panel says: MAKE YOUR MOVE NOW!
-
-CONTROLS
-  B = block   Space = spend the rest of your energy   Q = flee   H = this help
+Pro tips:
+  • Use walk to (-1, 4) with parentheses for exact coordinates.
+  • Craft better armor before heading into stormy weather.
+  • Inspect unknown items before eating or using them.
 """,
     "6. \u2623\ufe0f Diseases": """\u2623\ufe0f DISEASES
 Dirty water and bad food can make you sick. Diseases tick every day or night.
@@ -5496,42 +5424,6 @@ def _cluster_icon(cl, default_icon):
     return default_icon
 
 
-def _map_ground_icon(x, y):
-    try:
-        return GRID_GROUND_ARCTIC if biome_at(x, y) == "Arctic" else GRID_EMPTY
-    except Exception:
-        return GRID_EMPTY
-
-
-def _map_cluster_icon(cl):
-    item = str(cl.get("real_item") or cl.get("meta", {}).get("item", ""))
-    meta = cl.get("meta") or {}
-    if meta.get("is_burning"):
-        return "🔥"
-    if meta.get("is_ash"):
-        return "💨"
-    if item == "dirt":
-        return GRID_DIRT
-    if item == "wood":
-        return GRID_TREE
-    if item == "rock":
-        return GRID_ROCK
-    if item in ("fresh_water", "dirty_water", "freezing_water", "arctic_water",
-                "freezing_dirty_water", "water"):
-        return GRID_WATER
-    if item.endswith("berries") or item.endswith("berry") or "berr" in item:
-        return _cluster_icon(cl, GRID_BERRIES)
-    if "mushroom" in item or item in ("black_trumpets", "spotted_mushrooms"):
-        return _cluster_icon(cl, GRID_MUSHROOMS)
-    if item in ("fibergrass", "snow"):
-        return _cluster_icon(cl, GRID_GRASS)
-    if item.startswith("moss"):
-        return _cluster_icon(cl, GRID_MOSS)
-    if item == "catnip":
-        return _cluster_icon(cl, GRID_CATNIP)
-    return _cluster_icon(cl, GRID_RESOURCE)
-
-
 def _build_mini_map(player, world, map_w=17, map_h=11):
     """Build a mini-map panel showing the world around the player.
     Uses the same grid-mode tile constants (GRID_TREE, GRID_ROCK, etc.)
@@ -5540,9 +5432,24 @@ def _build_mini_map(player, world, map_w=17, map_h=11):
     map_w / map_h: tile dimensions (each tile is 2 display cols wide).
     """
     # Grid-mode tile constants (resolved at call time — defined later in file)
+    _EMPTY    = GRID_EMPTY
+    _TREE     = GRID_TREE
+    _ROCK     = GRID_ROCK
+    _CATNIP   = GRID_CATNIP
+    _BERRIES  = GRID_BERRIES
+    _MUSHROOMS= GRID_MUSHROOMS
+    _WATER    = GRID_WATER
+    _GRASS    = GRID_GRASS
+    _MOSS     = GRID_MOSS
+    _RESOURCE = GRID_RESOURCE
+
     # Arctic background override
     px, py = _world_tile(player.x, player.y)
-    bg = _map_ground_icon(px, py)
+    try:
+        in_forest = biome_at(px, py) == "Forest"
+    except Exception:
+        in_forest = True
+    bg = _EMPTY if in_forest else "🟦"
 
     hw = map_w // 2
     hh = map_h // 2
@@ -5553,7 +5460,7 @@ def _build_mini_map(player, world, map_w=17, map_h=11):
     cells = {}
     for gj in range(map_h):
         for gi in range(map_w):
-            cells[(gi, gj)] = _map_ground_icon(ox + gi, oy + gj)
+            cells[(gi, gj)] = bg
 
     # Clusters / resources
     clusters = world.clusters if world is not None else {}
@@ -5564,7 +5471,34 @@ def _build_mini_map(player, world, map_w=17, map_h=11):
         gi, gj = int(cx) - ox, int(cy) - oy
         if not (0 <= gi < map_w and 0 <= gj < map_h):
             continue
-        cells[(gi, gj)] = _map_cluster_icon(cl)
+        item = cl.get("real_item", "")
+        meta = cl.get("meta", {})
+        if meta.get("is_burning"):
+            icon = "🔥"
+        elif meta.get("is_ash"):
+            icon = "💨"
+        elif item == "wood":
+            icon = _TREE
+        elif item == "rock":
+            icon = _ROCK
+        elif item in ("fresh_water", "dirty_water", "freezing_water", "arctic_water",
+                      "freezing_dirty_water", "water"):
+            icon = _WATER
+        elif item.endswith("berries") or item.endswith("berry") or "berr" in item:
+            icon = _cluster_icon(cl, _BERRIES)
+        elif "mushroom" in item or item in ("black_trumpets", "spotted_mushrooms"):
+            icon = _cluster_icon(cl, _MUSHROOMS)
+        elif item in ("fibergrass", "snow"):
+            icon = _cluster_icon(cl, _GRASS)
+        elif item.startswith("moss"):
+            icon = _cluster_icon(cl, _MOSS)
+        elif item == "catnip":
+            icon = _cluster_icon(cl, _CATNIP)
+        elif item in ("bee_hive", "spider_silk"):
+            icon = _cluster_icon(cl, _RESOURCE)
+        else:
+            icon = _cluster_icon(cl, _RESOURCE)
+        cells[(gi, gj)] = icon
         if (gi, gj) == (hw, hh):
             player_cluster = cl
 
@@ -6159,7 +6093,11 @@ class Terminal:
         map_panel_w = MAP_TILE_W * 2 + 2   # 2 display cols per emoji + │…│
 
         px, py = _world_tile(player.x, player.y)
-        bg_empty = _map_ground_icon(px, py)
+        try:
+            in_forest = biome_at(px, py) == "Forest"
+        except Exception:
+            in_forest = True
+        bg_empty = GRID_EMPTY if in_forest else "🟦"
 
         # Player always at centre
         hw = MAP_TILE_W // 2
@@ -6178,7 +6116,7 @@ class Terminal:
         cells = {}
         for gj in range(MAP_TILE_H):
             for gi in range(MAP_TILE_W):
-                cells[(gi, gj)] = _map_ground_icon(ox + gi, oy + gj)
+                cells[(gi, gj)] = bg_empty
 
         clusters = getattr(world, "clusters", {}) or {}
         # ── Real-map layer ────────────────────────────────────────────────
@@ -6199,7 +6137,31 @@ class Terminal:
             gi, gj = tx - ox, ty - oy
             if not (0 <= gi < MAP_TILE_W and 0 <= gj < MAP_TILE_H):
                 continue
-            icon = _map_cluster_icon(cl)
+            item = cl.get("real_item", "")
+            meta = cl.get("meta", {})
+            if meta.get("is_burning"):
+                icon = "🔥"
+            elif meta.get("is_ash"):
+                icon = "💨"
+            elif item == "wood":
+                icon = GRID_TREE
+            elif item == "rock":
+                icon = GRID_ROCK
+            elif item in ("fresh_water", "dirty_water", "freezing_water",
+                          "arctic_water", "freezing_dirty_water", "water"):
+                icon = GRID_WATER
+            elif item.endswith("berries") or item.endswith("berry") or "berr" in item:
+                icon = _cluster_icon(cl, GRID_BERRIES)
+            elif "mushroom" in item or item in ("black_trumpets", "spotted_mushrooms"):
+                icon = _cluster_icon(cl, GRID_MUSHROOMS)
+            elif item in ("fibergrass", "snow"):
+                icon = _cluster_icon(cl, GRID_GRASS)
+            elif item.startswith("moss"):
+                icon = _cluster_icon(cl, GRID_MOSS)
+            elif item == "catnip":
+                icon = _cluster_icon(cl, GRID_CATNIP)
+            else:
+                icon = _cluster_icon(cl, GRID_RESOURCE)
             cells[(gi, gj)] = icon
 
 
@@ -6966,7 +6928,7 @@ def run_tutorial(term):
     sys.stdout.write("\033[2J"); sys.stdout.flush()
 
 # ==================== WEATHER ENGINE ====================
-class LegacyWeatherEffectsSystem:
+class WeatherSystem:
     def __init__(self):
         self.current = "☀️ clear"
         self.intensity = 0
@@ -7321,257 +7283,6 @@ class LegacyWeatherEffectsSystem:
         return None
 
 
-
-# ==================== DETERMINISTIC WEATHER AUTHORITY ====================
-class WeatherSystem:
-    """Game-facing weather wrapper backed by the multiscale physical engine.
-
-    LegacyWeatherEffectsSystem remains above for compatibility and historical
-    gameplay behavior. It is not used to choose weather any more. The physical
-    engine chooses the state; this class translates that state into the old
-    video's, sounds, resource, damage, and survival effects.
-    """
-    def __init__(self):
-        self.current = "☀️ CLEAR"
-        self.intensity = 0
-        self.dry_streak = 0
-        self.is_drought = False
-        self.tornado_active = False
-        self.tornado_type = "none"
-        self.tornado_timer = 0.0
-        self.tornado_x = 0.0
-        self.tornado_y = 0.0
-        self.rain_hours = 0.0
-        self.last_lightning = 0.0
-        self.last_evap = time.time()
-        self.lightning_hit = False
-        self.tornado_hit = False
-        self.firestorm_active = False
-        self.physical = None
-        self.bridge = None
-        self.last_realtime = time.time()
-        self.last_state_label = None
-        self._event_message_cooldown = 0.0
-        self._last_lightning_flash_s = -1.0
-        self._last_tornado_step_s = -1.0
-        self._dry_accumulated_s = 0.0
-        self._clock_restored = False
-        self._last_drought_day = -1
-        if HAVE_PHYSICAL_WEATHER:
-            self.physical = WeatherEngine(EngineConfig(
-                global_lat=32, global_lon=64, regional_n=33,
-                regional_spacing_km=1.0, global_dt_s=30.0,
-                regional_dt_s=2.0, forecast_horizon_s=720.0,
-                game_day_s=720.0, latitude_deg_per_coordinate=1.0/55.0,
-                coordinate_pole=4950, sun_energy_units=1_000_000_000.0,
-                sun_radius_miles=0.86e6, planet_distance_formula_miles=186e6,
-                planet_orbit_distance_miles=93e6, game_energy_to_celsius=178.0,
-                game_energy_terawatts=8.0, axial_tilt_deg=23.439,
-                diurnal_substep_s=0.5, deterministic_seed=9
-            ))
-            self.bridge = GameWeatherBridge(self.physical)
-
-    def is_raining(self):
-        return bool(self.bridge and self.bridge.is_raining())
-
-    def _set_properties(self, snapshot, event):
-        weather = event.get("weather", "clear")
-        labels = {
-            "clear": "☀️ CLEAR",
-            "light_rain": "🌦️ LIGHT RAIN",
-            "moderate_rain": "🌧️ MODERATE RAIN",
-            "heavy_storm": "⛈️ HEAVY STORM",
-            "severe_storm": "🌩️ SEVERE STORM",
-            "violent_storm": "🌪️ VIOLENT STORM",
-            "blizzard": "❄️ BLIZZARD",
-        }
-        self.current = labels.get(weather, "☁️ OVERCAST")
-        self.intensity = {"clear":0,"light_rain":1,"moderate_rain":2,"heavy_storm":3,
-                          "severe_storm":4,"violent_storm":4,"blizzard":4}.get(weather,1)
-        self.is_drought = bool(event.get("drought", False))
-        self.tornado_active = bool(event.get("tornado", False))
-        self.tornado_type = "violent" if self.tornado_active else "none"
-        self.tornado_x = float(event.get("tornado_x", 0.0))
-        self.tornado_y = float(event.get("tornado_y", 0.0))
-        self.tornado_hit = bool(event.get("tornado_hit", False))
-        self.lightning_hit = bool(event.get("lightning_hit", False))
-        self.firestorm_active = bool(getattr(self, "_manual_firestorm", False) or event.get("fire_weather", False))
-        if snapshot.rain_rate_mm_h > 0.1:
-            self.rain_hours += 1.0/60.0
-        if self.is_drought:
-            self.dry_streak += 1
-        else:
-            self.dry_streak = 0
-
-    def _legacy_hook(self, kind, snapshot, event, player, world, msg):
-        # Rain rendering/audio remains exactly the old game's job.
-        if kind == "weather_transition":
-            weather = event.get("weather")
-            if weather in {"light_rain","moderate_rain","heavy_storm","severe_storm","violent_storm"}:
-                try:
-                    _play_rain_video(max(1, self.intensity))
-                except Exception:
-                    pass
-            if weather == "blizzard":
-                try: _play_asset_sound("heavy_rain")
-                except Exception: pass
-        elif kind == "lightning":
-            try: _play_asset_sound("lightning")
-            except Exception: pass
-        elif kind == "tornado":
-            try:
-                if sound and sound.enabled:
-                    sound.play_tornado()
-            except Exception: pass
-
-    def _apply_tornado_effects(self, player, world, event):
-        if world is None or not event.get("tornado"):
-            return
-        tx=float(event.get("tornado_x",player.x)); ty=float(event.get("tornado_y",player.y))
-        radius=max(4.0, 12.0+0.018*math.sqrt(max(0.0,self.bridge.last_snapshot.cape_j_kg)))
-        for pos,cl in list(world.clusters.items()):
-            d=math.hypot(pos[0]-tx,pos[1]-ty)
-            if d <= radius:
-                # Deterministic radial destruction: closer material is more heavily removed.
-                frac=max(0.0,min(1.0,1.0-d/max(radius,1e-6)))
-                if frac>0.25 and cl.get("real_item") not in {"water","fresh_water","dirty_water"}:
-                    qty=max(1,int(cl.get("qty",1)*(1-frac)))
-                    if qty <= 1:
-                        cl["qty"]=1
-                        cl["real_item"]="ash"
-                        cl["name"]="💨 Ash Pile"
-                        cl["meta"]={"regrows":False,"is_ash":True,"hazard_key":None}
-                    else:
-                        cl["qty"]=qty
-        survivors=[]
-        for a in getattr(world,"animals",[]):
-            d=math.hypot(a.get("x",0)-tx,a.get("y",0)-ty)
-            if d > radius*0.65:
-                survivors.append(a)
-        world.animals=survivors
-        if event.get("tornado_hit"):
-            self.tornado_hit=True
-            damage=80.0
-            if getattr(player,"wearing",None):
-                damage*=player.armor_damage_multiplier()
-            player.note_damage_cause("Tornado strike")
-            player.health=max(0,player.health-damage)
-
-    def _apply_lightning_effects(self, player, world, event):
-        if not event.get("lightning_flash"):
-            return
-        lx=float(event.get("lightning_x",player.x)); ly=float(event.get("lightning_y",player.y))
-        dist=math.hypot(player.x-lx,player.y-ly)
-        if dist<=12.0 and world is not None:
-            for pos,cl in list(world.clusters.items()):
-                if math.hypot(pos[0]-lx,pos[1]-ly)<=1.5 and cl.get("real_item") not in {"water","fresh_water","dirty_water"}:
-                    cl["real_item"]="ash";cl["name"]="💨 Ash Pile";cl["qty"]=max(1,int(cl.get("qty",1)))
-                    cl["meta"]={"regrows":False,"is_ash":True,"hazard_key":None}
-        if event.get("lightning_hit"):
-            self.lightning_hit=True
-            damage=80.0 if self.intensity>=4 else 60.0
-            if getattr(player,"wearing",None): damage*=player.armor_damage_multiplier()
-            player.note_damage_cause("Lightning strike")
-            player.health=max(0,player.health-damage)
-
-    def _apply_deterministic_effects(self, player, world, snapshot, event, msg):
-        rain=snapshot.rain_rate_mm_h
-        if rain>0.1 and world is not None:
-            # Rain supplies water to existing sources and wets regrowing resource tiles.
-            add=max(1,int(rain/4.0))
-            for c in world.clusters.values():
-                if c.get("real_item") in {"water","fresh_water","dirty_water"}:
-                    c["qty"]=min(100,int(c.get("qty",0))+add)
-                meta=c.get("meta",{}) or {}
-                if meta.get("regrows"):
-                    c["rain_moisture"]=min(1.0,float(c.get("rain_moisture",0))+rain/100.0)
-        self._apply_lightning_effects(player,world,event)
-        self._apply_tornado_effects(player,world,event)
-        if event.get("blizzard") and player is not None:
-            player.temp=max(0.0,player.temp-0.08)
-        if self.is_drought and world is not None:
-            for c in world.clusters.values():
-                if c.get("real_item") in {"rock","dirt","sand","ash","water","fresh_water","dirty_water"}: continue
-                if c.get("meta",{}).get("regrows") or c.get("real_item") in {"wood","fibergrass","ironroot","mushrooms","wild_berries"}:
-                    c["qty"]=max(0,int(c.get("qty",0)*0.99))
-            for a in getattr(world,"animals",[]):
-                a["thirst"]=max(0,float(a.get("thirst",100))-0.25)
-        if event.get("drought") and msg is not None and self.last_state_label != "drought":
-            msg.append("🏜️ DROUGHT conditions: soil moisture falling and vegetation stress increasing.")
-
-    def tick_realtime(self, player, world, msg=None):
-        if not self.bridge:
-            return None
-        now=time.time(); dt=min(0.5,max(0.0,now-self.last_realtime)); self.last_realtime=now
-        if not self._clock_restored and self.physical:
-            self.physical.clock.time_s=float(getattr(player,"weather_clock_s",0.0))
-            self.physical.atmosphere.co2_ppm=float(getattr(player,"weather_co2_ppm",420.0))
-            self.physical.atmosphere.ch4_ppb=float(getattr(player,"weather_ch4_ppb",1900.0))
-            self.physical.atmosphere.n2o_ppb=float(getattr(player,"weather_n2o_ppb",336.0))
-            self.physical.atmosphere.aerosol_index=float(getattr(player,"weather_aerosol_index",0.15))
-            self._dry_accumulated_s=float(getattr(player,"weather_dry_seconds",0.0))
-            self._clock_restored=True
-        if dt < 0.15:
-            return self.bridge.last_snapshot
-        snapshot,event=self.bridge.tick(dt,int(player.x),int(player.y),player,world,msg,hooks=lambda k,s,e:self._legacy_hook(k,s,e,player,world,msg))
-        # Drought is a duration-integrated land-surface state: three full 12-minute game days
-        # of deficient rain are required before the drought flag turns on.
-        if snapshot.rain_rate_mm_h < 0.10:
-            self._dry_accumulated_s += dt
-        else:
-            self._dry_accumulated_s=max(0.0,self._dry_accumulated_s-dt*2.0)
-        self.is_drought = self._dry_accumulated_s >= 3.0*DAY_LENGTH
-        event["drought"] = bool(self.is_drought)
-        # Arctic snow is an atmospheric state, not a random weather roll.
-        if biome_at(player.x,player.y) == "Arctic" and snapshot.surface_temperature_c <= 1.5 and snapshot.wind_speed_m_s >= 10 and snapshot.rain_rate_mm_h > 0.15:
-            event["weather"]="blizzard"; event["blizzard"]=True
-        self._set_properties(snapshot,event)
-        player.weather_dry_seconds=self._dry_accumulated_s
-        if self.physical:
-            player.weather_clock_s=self.physical.clock.time_s
-            player.weather_co2_ppm=self.physical.atmosphere.co2_ppm
-            player.weather_ch4_ppb=self.physical.atmosphere.ch4_ppb
-            player.weather_n2o_ppb=self.physical.atmosphere.n2o_ppb
-            player.weather_aerosol_index=self.physical.atmosphere.aerosol_index
-        # Deterministic flash event is separate from the player-hit flag.
-        self._apply_deterministic_effects(player,world,snapshot,event,msg)
-        if self.is_drought:
-            current_day=int(self.physical.clock.time_s//DAY_LENGTH) if self.physical else 0
-            if current_day != self._last_drought_day:
-                self._last_drought_day=current_day
-                if world is not None:
-                    for c in world.clusters.values():
-                        if c.get("real_item") in {"rock","dirt","sand","ash","water","fresh_water","dirty_water"}: continue
-                        c["qty"]=max(0,int(c.get("qty",0)*0.82))
-                    survivors=[]
-                    for a in getattr(world,"animals",[]):
-                        a["thirst"]=max(0,float(a.get("thirst",100))-12)
-                        a["hunger"]=max(0,float(a.get("hunger",100))-8)
-                        if a["thirst"]>0 and a["hunger"]>0: survivors.append(a)
-                    world.animals=survivors
-        self.last_lightning=time.time() if event.get("lightning_flash") else self.last_lightning
-        self.last_state_label=event.get("weather")
-        return snapshot
-
-    def update_hourly(self, world, player):
-        """Compatibility method for the old main loop; does not advance time."""
-        if self.bridge and self.bridge.last_snapshot is not None:
-            s=self.bridge.last_snapshot
-            self._set_properties(s,event_effects(s))
-            return f"{self.current} | {s.surface_temperature_c:.1f}°C | rain {s.rain_rate_mm_h:.2f} mm/h | wind {s.wind_speed_m_s:.1f} m/s"
-        return self.current
-
-    def record_combustion(self, kind="burn_oil", magnitude=1.0):
-        if self.bridge:
-            result=self.bridge.ingest(kind,magnitude,0,0)
-            return result
-        return None
-
-    def status(self):
-        if self.bridge:
-            return self.bridge.status()
-        return {}
-
 # ==================== DISEASES ====================
 # Each disease declares its source category, tick effects, optional lifespan in
 # days, and recovery rolls keyed by the item the player consumes.
@@ -7736,15 +7447,9 @@ def _infect_player(player, source, msg):
         _unlock_and_show_tutorial(None, player, "disease")
     # Activate disease recovery quest on first infection
     if first_infection and player.quests.get("disease_recovery") == "pending":
-        player.quests["disease_recovery"] = "active"
-        player.quest_announced["disease_recovery"] = True
-        msg.append("📝 NEW QUEST: Recover from your disease with antidote tea or moss healing.")
+        activate("disease_recovery", "🧓 Old Man: You got sick! That's what happens when you drink dirty water or eat raw food. Get some antidote tea or moss healing to cure it!")
     if player.quests.get("disease_recovery") == "active" and not diseases:
-        player.quests["disease_recovery"] = "completed"
-        player.points += QUESTS["disease_recovery"]["pts"]
-        player.coins += QUESTS["disease_recovery"]["coins"]
-        player.quest_announced["disease_recovery"] = True
-        msg.append("✅ QUEST COMPLETE: You recovered from your disease! 30 points and 25 coins.")
+        complete("disease_recovery", "✅ QUEST COMPLETE: You recovered from your disease! 30 points and 25 coins.")
 
 def _apply_disease_recovery(player, item_key, msg):
     """When the player consumes item_key, roll recovery for each active disease
@@ -7975,9 +7680,9 @@ class Player:
         self.shield_type = None      # equipped shield name or None
         self.shield_dur_blocks = 0   # blocks remaining
         self.shield_dur_absorb = 0   # HP absorption remaining
-        # Combat state (live simultaneous engine).
+        # Turn-based combat state
         self.in_combat = False
-        self.combat = None
+        self.combat = None   # dict: {"enemies": [...], "player_ap": int, "player_turns": int, "blocking": False}
         self.flee_until = 0.0
         # Poison coating on spear: 1 application = 4 strikes OR 1 throw
         self.spear_poison_strikes = 0  # remaining doubled-damage strikes
@@ -8595,33 +8300,6 @@ def biome_at(x, y):
 def dist_to_border(x, y):
     """Signed distance to the Forest/Arctic border (positive = still in Forest)."""
     return FOREST_RADIUS - math.hypot(x, y)
-
-
-def _flee_direction(x, y, threat_positions):
-    away_vectors = []
-    for threat_x, threat_y in threat_positions:
-        dx, dy = x - threat_x, y - threat_y
-        distance = math.hypot(dx, dy)
-        if distance > 0.01:
-            away_vectors.append((dx / distance, dy / distance))
-    if not away_vectors:
-        return 1.0, 0.0
-
-    candidates = list(away_vectors)
-    candidates.extend((-dy, dx) for dx, dy in away_vectors)
-    candidates.extend((dy, -dx) for dx, dy in away_vectors)
-    sum_x = sum(dx for dx, _ in away_vectors)
-    sum_y = sum(dy for _, dy in away_vectors)
-    sum_length = math.hypot(sum_x, sum_y)
-    if sum_length > 0.01:
-        candidates.append((sum_x / sum_length, sum_y / sum_length))
-    diagonal = 1.0 / math.sqrt(2.0)
-    candidates.extend(((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
-                       (diagonal, diagonal), (diagonal, -diagonal),
-                       (-diagonal, diagonal), (-diagonal, -diagonal)))
-    return max(candidates, key=lambda direction: min(
-        direction[0] * away_x + direction[1] * away_y
-        for away_x, away_y in away_vectors))
 
 
 # ==================== WORLD ====================
@@ -9248,7 +8926,7 @@ class World:
         for name, meta in base_pool:
             # Reduced spawn chances for more even distribution (sparse, not dense)
             chance = 0.45
-            if meta["item"] in ["wood","water","fibergrass","rock","dirt"]: chance = 0.55
+            if meta["item"] in ["wood","water","fibergrass","rock"]: chance = 0.55
             elif meta["item"] == "bee_hive": chance = 0.20
             elif meta["item"] == "ironroot": chance = 0.35
             elif meta["item"] in ["berries","mushrooms"]: chance = 0.50
@@ -9655,10 +9333,6 @@ class World:
                         parent["has_pup"] = False
 
     def move_animals(self, player):
-        for animal in self.animals:
-            burrow_pos = animal.get("burrow_pos")
-            if isinstance(burrow_pos, list):
-                animal["burrow_pos"] = tuple(burrow_pos)
         now = time.time()
         to_remove = []
         for i, a in enumerate(self.animals):
@@ -9706,80 +9380,10 @@ class World:
                         a["hp"] = max(0.0, a.get("hp", a.get("max_hp", 1)) - dt * 6.0)
                         a["fleeing"] = True
 
-                animal_type = a.get("type", "")
-                if animal_type not in ("wolf", "young_wolf", "grot", "grot_leader"):
-                    vision_radius = float(adef.get("vision_max", 5))
-                    predator_radius = max(vision_radius, ANIMAL_SMELL_RADIUS.get(animal_type, 0), 6.0)
-                    threats = []
-                    if dist_to_player <= FOG_RADIUS:
-                        threats.append((dist_to_player, player.x, player.y))
-                    own_size = ANIMAL_SIZE.get(animal_type, 2)
-                    for other in self.animals:
-                        if other is a or other.get("hp", 0) <= 0:
-                            continue
-                        other_type = other.get("type", "")
-                        threat_dist = math.hypot(other["x"] - a["x"], other["y"] - a["y"])
-                        if other_type in ("wolf", "young_wolf", "grot", "grot_leader"):
-                            if threat_dist <= predator_radius:
-                                threats.append((threat_dist, other["x"], other["y"]))
-                        elif (ANIMAL_SIZE.get(other_type, own_size) > own_size
-                              and threat_dist <= 6.0):
-                            threats.append((threat_dist, other["x"], other["y"]))
-                    if threats:
-                        nearest_threat = min(threats, key=lambda threat: threat[0])
-                        a["fleeing"] = True
-                        a["_threat_pos"] = (nearest_threat[1], nearest_threat[2])
-                        flee_x, flee_y = _flee_direction(
-                            a["x"], a["y"], ((threat[1], threat[2]) for threat in threats))
-                        flee_step = max(real_speed, 0.05) * 2.0
-                        a["x"] += flee_x * flee_step
-                        a["y"] += flee_y * flee_step
-                        continue
-
-                is_deer = a.get("type") in ("deer", "young_deer")
-                if is_deer and 0.1 < dist_to_player < adef.get("vision_max", 10):
-                    a["fleeing"] = True
-                    a["_threat_pos"] = (player.x, player.y)
-
-                antelope_type = a.get("type")
-                if antelope_type in ("antelope", "young_antelope"):
-                    vision_radius = float(adef.get("vision_max", 10))
-                    danger_radius = max(vision_radius, ANIMAL_SMELL_RADIUS.get(antelope_type, 0))
-                    threats = []
-                    if dist_to_player <= vision_radius:
-                        threats.append((dist_to_player, player.x, player.y))
-                    for other in self.animals:
-                        if other is a or other.get("hp", 0) <= 0:
-                            continue
-                        if other.get("type") not in ("wolf", "young_wolf", "grot", "grot_leader"):
-                            continue
-                        threat_dist = math.hypot(other["x"] - a["x"], other["y"] - a["y"])
-                        if threat_dist <= danger_radius:
-                            threats.append((threat_dist, other["x"], other["y"]))
-                    if threats:
-                        nearest_threat = min(threats, key=lambda threat: threat[0])
-                        a["fleeing"] = True
-                        a["_threat_pos"] = (nearest_threat[1], nearest_threat[2])
-                        flee_x = flee_y = 0.0
-                        for threat_dist, threat_x, threat_y in threats:
-                            threat_dist = max(threat_dist, 0.1)
-                            flee_x += (a["x"] - threat_x) / threat_dist
-                            flee_y += (a["y"] - threat_y) / threat_dist
-                        flee_dist = math.hypot(flee_x, flee_y)
-                        if flee_dist <= 0.1:
-                            flee_x, flee_y = a["x"] - nearest_threat[1], a["y"] - nearest_threat[2]
-                            flee_dist = math.hypot(flee_x, flee_y)
-                        if flee_dist <= 0.1:
-                            flee_x, flee_y, flee_dist = 1.0, 0.0, 1.0
-                        flee_step = max(real_speed, 0.05) * 2.0
-                        a["x"] += flee_x / flee_dist * flee_step
-                        a["y"] += flee_y / flee_dist * flee_step
-                        continue
-
                 target = None; target_d = float('inf'); target_score = float('inf')
                 is_rabbit = a.get("type") in ("rabbit", "young_rabbit")
                 fullness_target = ANIMAL_FULLNESS_TARGET.get(a.get("type"), 75.0)
-                if a.get("hunger", 0.0) >= fullness_target and not a.get("fleeing"):
+                if a.get("hunger", 0.0) >= fullness_target:
                     base_type = _animal_base_type(a.get("type", ""))
                     smell_radius = ANIMAL_SMELL_RADIUS.get(a.get("type"), 15.0)
                     mate = min((b for b in self.animals
@@ -9813,7 +9417,7 @@ class World:
                     if target is not None:
                         target_d = math.hypot(target[0] - a["x"], target[1] - a["y"])
                         target_score = -0.5
-                if target is None and a.get("hunger", 0.0) < fullness_target and not a.get("fleeing") and a.get("type") not in ("cat", "young_cat", "grot", "grot_leader"):
+                if target is None and a.get("hunger", 0.0) < fullness_target and a.get("type") not in ("cat", "young_cat", "grot", "grot_leader"):
                     for pos, cl in self.clusters.items():
                         if cl is None or cl.get("qty", 0) <= 0:
                             continue
@@ -9937,28 +9541,23 @@ class World:
                             a["x"] += (ring_x - a["x"]) / ring_dist * min(real_speed * 0.35, ring_dist)
                             a["y"] += (ring_y - a["y"]) / ring_dist * min(real_speed * 0.35, ring_dist)
                     continue
-                player_meat=10.0+min(10.0,(player.inventory.get("meat",0)+player.inventory.get("raw_game",0))*0.5)
-                player_trouble=max(4.0,player.health*0.28)
-                if player.wearing: player_trouble += {"light_armor":4.0,"medium_armor":8.0,"heavy_armor":14.0}.get(player.wearing,3.0)
-                if player.shield_type: player_trouble += 7.0
-                if player.spear_type and player.spear_dur>0: player_trouble += 8.0
-                pack_power=sum(max(1,w.get("atk",3)) for w in pack)
-                hunt_player=dist_to_player<=a.get("vision_max",10) and len(pack)>=2 and pack_power>=player_trouble and player_meat>=8.0
-                a["_hunting_player"]=bool(hunt_player)
-                if hunt_player:
-                    if dist_to_player > 1.0:
-                        slot=pack.index(a) if a in pack else 0
-                        angle=(2*math.pi*slot/max(1,len(pack)))+now*0.03
-                        px=player.x+math.cos(angle)*1.1; py=player.y+math.sin(angle)*1.1
-                        d_player=math.hypot(px-a["x"],py-a["y"])
-                        if d_player>0.2:
-                            a["x"] += (px-a["x"])/d_player*min(real_speed*0.35,d_player)
-                            a["y"] += (py-a["y"])/d_player*min(real_speed*0.35,d_player)
-                    elif now-a.get("_last_player_attack",0.0)>=2.0:
-                        a["_last_player_attack"]=now
-                        player.note_damage_cause("Wolf pack attack")
-                        player.health=max(0,player.health-max(1,a.get("atk",3)))
-                continue
+                if dist_to_player <= a.get("vision_max", 10):
+                    pack_power = sum(max(1, w.get("atk", 3)) for w in pack)
+                    if pack_power >= player.health and len(pack) > 1:
+                        if dist_to_player > 1.0:
+                            slot = pack.index(a) if a in pack else 0
+                            angle = (2 * math.pi * slot / max(1, len(pack))) + now * 0.03
+                            px = player.x + math.cos(angle) * 1.1
+                            py = player.y + math.sin(angle) * 1.1
+                            d_player = math.hypot(px - a["x"], py - a["y"])
+                            if d_player > 0.2:
+                                a["x"] += (px - a["x"]) / d_player * min(real_speed * 0.35, d_player)
+                                a["y"] += (py - a["y"]) / d_player * min(real_speed * 0.35, d_player)
+                        elif now - a.get("_last_player_attack", 0.0) >= 2.0:
+                            a["_last_player_attack"] = now
+                            player.note_damage_cause("Wolf pack attack")
+                            player.health = max(0, player.health - max(1, a.get("atk", 3)))
+                    continue
                 # A lone wolf remains mobile and may investigate the player.
                 if len(pack) == 1 and dist_to_player <= a.get("vision_max", 10):
                     if dist_to_player > 1.0:
@@ -10077,9 +9676,6 @@ class World:
             # ---- Cat AI ----
             if a["type"] in ("cat", "young_cat"):
                 is_young = a["type"] == "young_cat"
-                if not a.get("_following_player") and dist_to_player < 8.0:
-                    a["fleeing"] = True
-                    a["_threat_pos"] = (player.x, player.y)
                 # Cats flee grots on sight
                 nearest_grot_cat = None; ng_dist = float('inf')
                 for g in self.animals:
@@ -10185,6 +9781,36 @@ class World:
                     elif a.get("_hunting_prey"):
                         a["_hunting_prey"] = False
                         a["_announce_return"] = True
+                # Wild (unbonded) cat: approach player out of curiosity, but lose interest if no meat
+                if not is_young and not a.get("_following_player") and not a.get("_hunting_prey") and dist_to_player < 8.0:
+                    if not a.get("_approach_start"):
+                        a["_approach_start"] = now
+                    if now - a["_approach_start"] > GAME_HOUR * 2:
+                        # Lost interest — calmly walk away rather than vanishing.
+                        a["_lost_interest"] = True
+                        wx = random.uniform(-1, 1); wy = random.uniform(-1, 1)
+                        # Bias the wander slightly away from the player so it
+                        # visibly strolls off instead of popping out of existence.
+                        if dist_to_player > 0.1:
+                            wx += (a["x"]-player.x)/dist_to_player * 0.6
+                            wy += (a["y"]-player.y)/dist_to_player * 0.6
+                        a["x"] += wx * real_speed
+                        a["y"] += wy * real_speed
+                        # Only despawn once it has clearly walked well off-screen.
+                        if dist_to_player > FOG_RADIUS * 2.5:
+                            to_remove.append(i)
+                        continue
+
+                    if dist_to_player > 1.5:
+                        dx = (player.x-a["x"])/dist_to_player
+                        dy = (player.y-a["y"])/dist_to_player
+                        a["x"] += dx * real_speed * 0.4
+                        a["y"] += dy * real_speed * 0.4
+                        continue
+                elif a.get("_approach_start") and dist_to_player >= 8.0 and not a.get("_following_player"):
+                    # Out of range, reset approach timer
+                    a.pop("_approach_start", None)
+
                 # Cat hunts rodents (if not young)
                 if not is_young:
                     prey_cat = None; prey_cd = float('inf')
@@ -10681,11 +10307,7 @@ def animal_retaliation(player, world, target, msg):
         # gather nearby hostile animals (within 5 tiles) including the target
         attackers = [a for a in world.animals if a.get("atk",0) > 0 and math.hypot(a["x"]-player.x, a["y"]-player.y) <= 5]
         if attackers:
-            _t = globals().get('_ACTIVE_TERM')
-            if _t is not None:
-                run_live_combat(_t, player, world, attackers, msg)
-            else:
-                start_turn_based_combat(player, world, attackers, msg)
+            start_turn_based_combat(player, world, attackers, msg)
             return
     # If already in combat, fallback to immediate damage (rare path)
     dmg = int(round(target.get("atk", 0) * player.armor_damage_multiplier()))
@@ -10852,48 +10474,35 @@ def _build_spear_tutorial_lines(player):
 def _build_grot_combat_tutorial_lines(player):
     return [
         "\u2554" + "\u2550" * 56 + "\u2557",
-        "   👹  GROT COMBAT — LIVE TUTORIAL  ⚔️",
+        "   \U0001f479  GROT COMBAT \u2014 TUTORIAL  \u2694\ufe0f",
         "\u255a" + "\u2550" * 56 + "\u255d",
         "",
-        "A grot has spotted you! Combat is LIVE: you and the enemies",
-        "move and attack at the same time instead of taking separate turns.",
+        "A grot has spotted you! When a grot sees you, the world",
+        "snaps into GRID MODE \u2014 a turn-based standoff.",
         "",
-        "▶ ENERGY CYCLES",
-        "  • You start with 100 combat energy; a grot starts with 100.",
-        "  • Wolves start with 130. Every action or movement spends energy.",
-        "  • When YOU reach 0, or every living enemy reaches 0, the cycle resets.",
-        "  • Everyone is restored to full combat energy at the reset.",
+        "\u25b6 WHAT TO EXPECT",
+        "  \u2022 Grots hit HARD. A clean blow takes a serious chunk of HP.",
+        "  \u2022 They travel in packs \u2014 expect company.",
+        "  \u2022 Grot leaders hit even harder. Come prepared!",
         "",
-        "▶ YOUR MOVES",
-        "  Arrow keys — move while the enemies move too.",
-        "  G — grab up to 10 dirt while standing on dirt.",
-        "  T — throw your dirt as a moving dust cloud. It can be dodged.",
-        "  S — punch within 1.5 tiles (25 energy).",
-        "  I — kick up to 1 coordinate away (35 energy).",
-        "  E — spear stab. A — spear throw. S then T quickly = extended spear.",
-        "  B — block for the current cycle. Space — spend your remaining energy.",
+        "\u25b6 COME PREPARED",
+        "  \u2022 Wear armor \u2014 every tier blunts more of their swing.",
+        "  \u2022 Bring a spear with durability left, and a shield if you can.",
+        "  \u2022 Coat your spear in poison for doubled damage on the next hits.",
+        "  \u2022 Keep food, water, and a campfire ready for after the fight.",
         "",
-        "▶ DIRT & BLINDNESS",
-        "  A direct dirt hit blinds for the blind duration (ninjas are immune).",
-        "  Blind grots lose track of you and wander. Blind wolves still smell you,",
-        "  but take 1.5× as long to reach you. A dense early dirt hit can hit hard.",
+        "\u25b6 IN GRID MODE",
+        "  \u2022 Move, attack, throw, block \u2014 each costs action points.",
+        "  \u2022 Trees are walkable but cost 1.3x energy; rocks cost 1.5x.",
+        "  \u2022 Entities only move once your turn ends (energy runs out / pass).",
+        "  \u2022 You can try to flee, but turning your back is risky.",
+        "  \u2022 Active crafting PAUSES while you fight, and resumes after.",
         "",
-        "▶ THE GROT",
-        "  A grot can punch, kick, use teeth dig (45 energy / 6 damage), or throw",
-        "  up to 5 dirt. It actively tries to spend its energy instead of waiting.",
-        "  If you punch or kick it down, it stays on the floor until the cycle ends.",
-        "  It does NOT disappear. The right side of the screen tells you when",
-        "  the grot is down: MAKE YOUR MOVE NOW!",
+        "Stay sharp. A surprised hunter is a hurt hunter.",
         "",
-        "▶ IMPORTANT",
-        "  The combat map shows the actual graphics-mode terrain, resources,",
-        "  houses, and animal emojis around you. H opens the complete rules.",
-        "  Q attempts to flee. Active crafting pauses during combat.",
-        "",
-        "Stay sharp. In live combat, positioning is part of every attack.",
-        "",
-        "📜 Tip: type 'tutorials' any time to re-read this page.",
+        "\U0001f4dc Tip: type 'tutorials' any time to re-read this page.",
     ]
+
 
 def _build_rest_tutorial_lines(player):
     return [
@@ -11001,42 +10610,42 @@ def _build_first_spear_tutorial_lines(player):
 def _build_hunt_tutorial_lines(player):
     return [
         "\u2554" + "\u2550" * 56 + "\u2557",
-        "   🏹  HUNT — TUTORIAL  🐺",
+        "   \U0001f3f9  HUNT \u2014 TUTORIAL  \U0001f43e",
         "\u255a" + "\u2550" * 56 + "\u255d",
         "",
-        "Hunting can now turn into LIVE COMBAT. You do not need a spear",
-        "to fight: movement, dirt, punches, and kicks all work on their own.",
+        "You just tried hunting! Here's how the hunt command works.",
         "",
-        "▶ BASIC USAGE",
-        "  hunt <animal>           — engage the nearest matching animal.",
-        "  hunt <animal> throw     — use the spear-throw aim minigame.",
-        "  hunt <animal> grid      — enter the same LIVE COMBAT engine manually.",
+        "\u25b6 BASIC USAGE",
+        "  hunt <animal>           \u2014 strike the nearest one up close.",
+        "  hunt <animal> throw     \u2014 throw your spear at it (aim minigame).",
+        "  hunt <animal> grid      \u2014 enter grid mode for a tactical fight.",
+        "  Examples: 'hunt rabbit', 'hunt seal throw', 'hunt deer grid'.",
         "",
-        "▶ LIVE COMBAT",
-        "  Arrow keys  — move in the world while enemies move too.",
-        "  G           — grab up to 10 dirt from a dirt patch.",
-        "  T           — throw the dirt cloud; dodgeable and expanding in flight.",
-        "  S           — punch; I = kick.",
-        "  E           — spear stab; A = spear throw.",
-        "  H           — open the full combat rules. Q = attempt to flee.",
+        "\u25b6 WHAT YOU NEED",
+        "  \u2022 A spear in your inventory with durability left.",
+        "  \u2022 To be in the right biome \u2014 seals live in Arctic, not Forest!",
+        "  \u2022 At least one of that animal nearby. Explore to find them.",
         "",
-        "▶ ENERGY",
-        "  Everyone has a combat-energy pool. Actions and movement spend it.",
-        "  When you hit 0 energy, or every living enemy hits 0, everyone refills",
-        "  and a new combat cycle starts.",
+        "\u25b6 SIGHT & FLEEING",
+        "  Animals can spot you BEFORE you act. If they do, they may bolt",
+        "  before your throw even lands. Get closer if you can sneak in.",
         "",
-        "▶ DIRT",
-        "  Dirt is intentionally easy to dodge. The trick is timing and coverage.",
-        "  A direct hit blinds most enemies. Wolves keep smell; ninjas ignore it.",
+        "\u25b6 STRIKE vs THROW vs GRID",
+        "  \u2022 Strike  \u2014 best at point blank, low durability cost.",
+        "  \u2022 Throw   \u2014 great at range, but uses more durability and",
+        "    a miss can mean a lost or broken spear. Ice spears shatter!",
+        "  \u2022 Grid    \u2014 turn-based, multi-target. Use it for packs",
+        "    (like grots or a herd of deer) or anything dangerous.",
         "",
-        "▶ SPEAR",
-        "  The spear is still valuable, but it is now one tool among several.",
-        "  Use E for a fast melee stab, A for the separate throwing minigame,",
-        "  and press S then T rapidly for the extended spear move.",
+        "\u25b6 BIG TIPS",
+        "  \u2022 Big animals are easy to hit but hard to bring down \u2014 expect a fight!",
+        "  \u2022 Small critters are hard to hit but flee easily once tagged.",
+        "  \u2022 'poison spear' coats your tip: next 4 strikes OR 1 throw hit twice as hard.",
+        "  \u2022 Carry a backup spear and watch your durability bar.",
         "",
-        "Happy hunting. Watch the terrain, not just the enemy!",
+        "Happy hunting!",
         "",
-        "📜 Tip: type 'tutorials' any time to re-read this page.",
+        "\U0001f4dc Tip: type 'tutorials' any time to re-read this page.",
     ]
 
 def _build_house_tutorial_lines(player):
@@ -12845,791 +12454,9 @@ def _tick_animal_sounds(player, world, sound):
     sound.play_animal_type(atype)
 
 
-
-# ==================== LIVE COMBAT ENGINE ====================
-# Normal battles now use this engine.  The older grid/AP implementation below
-# is intentionally left in place as legacy/reference code.
-LIVE_GRID_SIZE = 20
-LIVE_MOVE_COST = 4.0
-LIVE_MOVE_COOLDOWN = 0.12
-LIVE_ROUND_ENERGY = 100.0
-LIVE_WOLF_ENERGY = 130.0
-LIVE_GROT_ENERGY = 100.0
-LIVE_DUST_STEP = 0.50
-LIVE_PUNCH_COST = 25.0
-LIVE_PUNCH_RANGE = 1.5
-LIVE_PUNCH_BAM_COST = 80.0
-LIVE_PUNCH_BAM_DAMAGE = 10.0
-LIVE_KICK_COST = 35.0
-LIVE_KICK_RANGE = 1.5
-LIVE_BLOCK_COST = 30.0
-LIVE_WOLF_BITE_COST = 80.0
-LIVE_GROT_BITE_COST = 45.0
-LIVE_GROT_BITE_DAMAGE = 6.0
-LIVE_SPEAR_STAB_COST = 25.0
-LIVE_SPEAR_EXTENDED_COST = 30.0
-LIVE_SPEAR_THROW_COST = 40.0
-LIVE_SPEAR_ANIM = 0.18
-LIVE_COMBO_WINDOW = 0.42
-LIVE_BLIND_ROUNDS = 1
-
-
-def _live_label(t):
-    return str(t or 'enemy').replace('_', ' ').title()
-
-
-def _live_dist_xy(ax, ay, bx, by):
-    return math.hypot(float(ax)-float(bx), float(ay)-float(by))
-
-
-def _live_enemy_energy_max(t):
-    if t in ('wolf', 'young_wolf'): return LIVE_WOLF_ENERGY
-    if t in ('grot', 'grot_leader'): return LIVE_GROT_ENERGY
-    return LIVE_ROUND_ENERGY
-
-
-def _live_enemy_speed(t):
-    if t == 'wolf': return 2.2
-    if t == 'young_wolf': return 1.9
-    if t == 'grot': return 1.25
-    if t == 'grot_leader': return 1.35
-    return 1.5
-
-
-def _live_enemy(ref, idx):
-    hp = float(ref.get('hp', ref.get('max_hp', 1)))
-    return {
-        'ref': ref, 'type': ref.get('type', 'enemy'), 'hp': hp,
-        'max_hp': float(ref.get('max_hp', hp)), 'atk': float(ref.get('atk', 0)),
-        'def': int(ref.get('def', 0)), 'energy_max': _live_enemy_energy_max(ref.get('type','')),
-        'energy': _live_enemy_energy_max(ref.get('type','')), 'blind': 0,
-        'fallen': 0, 'dirt': 0, 'pack_index': idx, 'ai_next': 0.0,
-        'wander_angle': random.uniform(0, math.tau), 'last_action': ''
-    }
-
-
-def _live_sync_enemy(e):
-    r=e.get('ref') or {}
-    r['hp']=max(0.0, float(e.get('hp',0)))
-    r['fleeing']=bool(e.get('fleeing',False))
-
-
-def _live_dirt_qty(world,x,y):
-    c=world.clusters.get((int(x),int(y)))
-    return int(c.get('qty',0)) if c and c.get('real_item')=='dirt' else 0
-
-
-def _live_take_dirt(world,x,y,n):
-    pos=(int(x),int(y)); c=world.clusters.get(pos)
-    if not c or c.get('real_item')!='dirt' or c.get('qty',0)<=0: return 0
-    take=min(int(n),int(c.get('qty',0)))
-    c['qty']-=take
-    if c['qty']<=0:
-        world.depleted.add(pos); world.clusters.pop(pos,None)
-    return take
-
-
-def _live_pick_enemy(player,enemies,max_dist=None):
-    live=[e for e in enemies if e.get('hp',0)>0]
-    if max_dist is not None:
-        live=[e for e in live if _live_dist_xy(player.x,player.y,e['ref']['x'],e['ref']['y'])<=max_dist]
-    if not live: return None
-    return min(live,key=lambda e:_live_dist_xy(player.x,player.y,e['ref']['x'],e['ref']['y']))
-
-
-def _live_front_enemy(player,enemies,reach):
-    fx,fy=(player.combat or {}).get('facing',(1,0))
-    if fx==0 and fy==0: fx=1
-    candidates=[]
-    for e in enemies:
-        if e.get('hp',0)<=0: continue
-        vx=e['ref']['x']-player.x; vy=e['ref']['y']-player.y
-        d=math.hypot(vx,vy)
-        if d<=0 or d>reach: continue
-        dot=(vx*fx+vy*fy)/d
-        perp=abs(vx*(-fy)+vy*fx)
-        if dot>=0.2 and perp<=1.0: candidates.append((d,e))
-    return min(candidates,key=lambda x:x[0])[1] if candidates else _live_pick_enemy(player,enemies,reach)
-
-
-def _live_damage_player(player,damage,enemy,msg,source='attack'):
-    final=int(round(max(0.0,damage)*player.armor_damage_multiplier()))
-    st=player.combat or {}
-    if st.get('blocking') and final>0:
-        if player.shield_type:
-            final,full=_apply_shield_block(player,final,msg)
-            if full: return 0
-        elif random.random()<0.6:
-            final=int(round(final*0.5)); msg.append('🛡️ You partially block the blow!')
-    if final<=0: return 0
-    if player.wearing:
-        player.armor_dur-=final
-        if player.armor_dur<=0:
-            player.wearing=None; player.armor_dur=0; msg.append('💥 Armor broke!')
-    player.note_damage_cause(f"{_live_label(enemy.get('type'))} {source}")
-    player.health=max(0.0,player.health-final)
-    action_label = str(source or 'attack').replace('_', ' ')
-    msg.append(f"💥 {_live_label(enemy.get('type'))} {action_label} you -{final} HP")
-    return final
-
-
-def _live_round_up(state,msg,reason='energy exhausted'):
-    """Start a fresh live-combat energy cycle.
-
-    A cycle ends as soon as the player runs out of energy, OR once every
-    living enemy has exhausted its own pool. Everyone then gets a fresh pool.
-    Fallen enemies remain visibly on the ground until the next cycle.
-    """
-    state['round'] += 1
-    state['player_energy'] = LIVE_ROUND_ENERGY
-    state['blocking'] = False
-    state['player_blind'] = max(0, state.get('player_blind', 0) - 1)
-    for e in state['enemies']:
-        e['energy'] = e['energy_max']
-        e['blind'] = max(0, e.get('blind', 0) - 1)
-        # A successful punch/kick knocks an enemy down for the remainder of
-        # the current cycle. It gets back up only when the next cycle begins.
-        e['fallen'] = max(0, e.get('fallen', 0) - 1)
-        e['last_action'] = ''
-    msg.append(f"🔁 Combat cycle {state['round']} — {reason}. Everyone recovers to full combat energy.")
-
-
-def _live_player_move(player,dx,dy,state):
-    if state['player_energy']<LIVE_MOVE_COST: return False
-    player.x+=dx; player.y+=dy
-    state['player_energy']=max(0.0,state['player_energy']-LIVE_MOVE_COST)
-    state['facing']=(dx,dy); player.last_move_time=time.time()
-    try:
-        if getattr(player,'sound',None) and player.sound.enabled: player.sound.play_walk()
-    except Exception: pass
-    return True
-
-
-def _live_grab(player,world,state,msg):
-    if state['dirt']>=10:
-        msg.append('🫳 Your hands are full of dirt (10/10).'); return False
-    x,y=int(round(player.x)),int(round(player.y)); take=_live_take_dirt(world,x,y,10-state['dirt'])
-    if not take:
-        msg.append('❌ You must be standing on a dirt patch to grab dirt.'); return False
-    state['dirt']+=take; msg.append(f"🫳 Grabbed {take} dirt ({state['dirt']}/10).")
-    return True
-
-
-def _live_projectile_add(state,owner,count,x,y,dx,dy):
-    if count<=0: return
-    if dx==0 and dy==0: dx,dy=state.get('facing',(1,0))
-    mag=math.hypot(dx,dy); dx,dy=dx/mag,dy/mag
-    state['projectiles'].append({'owner':owner,'count':int(count),'x':x,'y':y,
-                                 'dx':int(round(dx)),'dy':int(round(dy)),
-                                 'start':time.time(),'hit_ids':set()})
-
-
-def _live_projectile_cells(p,now):
-    elapsed=now-p['start']
-    trajectory_duration=0.75
-    if elapsed>=trajectory_duration+0.5: return []
-    step=min(4,int(elapsed//0.25))
-    rows=((1,),(2,),(2,1),(3,2,1),(4,3))[step]
-    travel_step=min(3,int(elapsed//0.25))
-    px,py=-p['dy'],p['dx']
-    cells=[]
-    remaining=p['count']
-    for row_index,row_width in enumerate(rows):
-        width=min(row_width,remaining)
-        remaining-=width
-        dist=max(0,travel_step-row_index)
-        cx=int(round(p['x']+p['dx']*dist)); cy=int(round(p['y']+p['dy']*dist))
-        left=-(width//2)
-        cells.extend((cx+px*i,cy+py*i) for i in range(left,left+width))
-        if remaining<=0: break
-    return list(dict.fromkeys(cells))
-
-
-def _live_projectile_tick(player,state,now,msg):
-    keep=[]
-    for p in state['projectiles']:
-        elapsed=now-p['start']
-        if elapsed>=1.25: continue
-        if elapsed>=0.75:
-            keep.append(p)
-            continue
-        step=min(2,int(elapsed//0.25))+1
-        width=[max(1,int(math.ceil(p['count']/3))),max(1,int(math.ceil(p['count']*2/3))),p['count']][step-1]
-        cx=p['x']+p['dx']*step; cy=p['y']+p['dy']*step
-        px,py=-p['dy'],p['dx']
-        if p['owner']=='player':
-            targets=state['enemies']
-        else:
-            targets=[{'type':'player','ref':player,'hp':player.health,'dirt_count':p['count']}]
-        for t in targets:
-            if t.get('hp',0)<=0: continue
-            obj=t if p['owner']=='player' else player; tid=id(obj)
-            if tid in p['hit_ids']: continue
-            tx=t['ref']['x'] if p['owner']=='player' else player.x
-            ty=t['ref']['y'] if p['owner']=='player' else player.y
-            rx,ry=tx-cx,ty-cy; forward=rx*p['dx']+ry*p['dy']; perp=abs(rx*px+ry*py)
-            if abs(forward)>1.0 or perp>width/2+0.7: continue
-            p['hit_ids'].add(tid)
-            centered=max(0.0,1.0-perp/(width/2+0.7))
-            hit_count=max(1,min(p['count'],int(round(p['count']*(0.35+0.45*centered)))))
-            damage=max(0,(hit_count-1)*5)
-            if width<p['count']: damage*=2
-            if p['owner']=='player':
-                if t.get('type')!='ninja': t['blind']=max(1,t.get('blind',0))
-                if damage:
-                    t['hp']=max(0,t['hp']-damage); _live_sync_enemy(t)
-                    msg.append(f"💨 Dirt hits {_live_label(t['type'])}: {hit_count} dirt, -{damage} HP")
-                else: msg.append(f"💨 Dirt blinds {_live_label(t['type'])}!")
-                if t.get('hp',0) <= 0:
-                    try: resolve_animal_kill(player,state['world'],t['ref'],msg)
-                    except Exception: pass
-                _flash_hit(t.get('type',''))
-            else:
-                state['player_blind']=LIVE_BLIND_ROUNDS; state['blackout']=True
-                msg.append('💨 Grot dust hits you! Everything goes black for this turn.')
-        keep.append(p)
-    state['projectiles']=keep
-
-
-def _live_enemy_grab_dirt(e,world):
-    if e['type'] not in ('grot','grot_leader') or e['dirt']>=5: return
-    x,y=int(round(e['ref']['x'])),int(round(e['ref']['y']))
-    e['dirt']+=_live_take_dirt(world,x,y,5-e['dirt'])
-
-
-def _live_player_meat_value(player):
-    """Treat the player as roughly a young-deer-sized meat source."""
-    carried=int(player.inventory.get('meat',0))+int(player.inventory.get('raw_game',0))
-    return 10.0+min(10.0,carried*0.5)
-
-
-def _live_player_hunt_trouble(player):
-    trouble=max(4.0,float(player.health)*0.28)
-    if getattr(player,'wearing',None):
-        trouble += {'light_armor':4.0,'medium_armor':8.0,'heavy_armor':14.0}.get(player.wearing,3.0)
-    if getattr(player,'shield_type',None): trouble += 7.0
-    if getattr(player,'spear_type',None) and getattr(player,'spear_dur',0)>0: trouble += 8.0
-    return trouble
-
-
-def _live_wolf_pack(state,e):
-    pid=(e.get('ref') or {}).get('pack_id')
-    return [w for w in state['enemies'] if w.get('hp',0)>0 and w.get('type') in ('wolf','young_wolf')
-            and (w.get('ref',{}).get('pack_id')==pid if pid else w is e)]
-
-
-def _live_wolf_target(e,player,state):
-    """Choose worthwhile meat; wolves do not automatically target the player."""
-    world=state['world']; pack=_live_wolf_pack(state,e)
-    pack_power=sum(max(1.0,w.get('atk',3.0)) for w in pack)
-    candidates=[]
-    for a in getattr(world,'animals',[]) or []:
-        if a is e.get('ref') or a.get('hp',0)<=0: continue
-        typ=a.get('type','')
-        if typ in ('wolf','young_wolf','cat','young_cat'): continue
-        meat=float(ANIMAL_DEFS.get(typ,{}).get('loot',{}).get('meat',0))
-        if typ in ('grot','grot_leader'): meat=max(meat,5.0)
-        if meat<=0: continue
-        d=_live_dist_xy(a.get('x',0),a.get('y',0),e['ref']['x'],e['ref']['y'])
-        if d<=10.0:
-            trouble=max(2.0,float(a.get('hp',1)))+max(0.0,float(a.get('atk',0))*2.0)
-            candidates.append((meat/trouble,-d,'animal',a))
-    pd=_live_dist_xy(player.x,player.y,e['ref']['x'],e['ref']['y'])
-    if pd<=10.0:
-        meat=_live_player_meat_value(player); trouble=_live_player_hunt_trouble(player)
-        if pack_power>=trouble:
-            candidates.append((meat/trouble,-pd,'player',player))
-    if not candidates: return None
-    candidates.sort(key=lambda c:(c[0],c[1]),reverse=True)
-    _,_,kind,ref=candidates[0]
-    return {'kind':kind,'ref':ref}
-
-
-def _live_predator_kill(predator, prey, world, msg):
-    """Give a live predator its kill instead of awarding it to the player."""
-    prey_type = prey.get('type', 'prey')
-    loot = dict(ANIMAL_DEFS.get(prey_type, {}).get('loot', {}))
-    if 'meat' in loot:
-        loot['meat'] = animal_meat_yield(prey)
-    carried = predator.setdefault('ref', {}).setdefault('_carried_loot', {})
-    for item, qty in loot.items():
-        carried[item] = carried.get(item, 0) + qty
-    try:
-        world.animals.remove(prey)
-    except ValueError:
-        pass
-    msg.append(f"🐺 {_live_label(predator.get('type'))} killed {_live_label(prey_type)} and claimed its food.")
-
-
-def _live_enemy_attack(e,player,state,msg):
-    """Choose the grot/wolf action that spends energy intelligently.
-
-    The current target is carried from the movement decision into the attack
-    decision. This prevents a wolf from reaching its prey, re-evaluating the
-    pack target a fraction later, and merely circling instead of biting.
-    """
-    if e['fallen'] or e['hp']<=0: return False
-    typ=e['type']; d=_live_dist_xy(e['ref']['x'],e['ref']['y'],player.x,player.y)
-    if typ in ('wolf','young_wolf'):
-        target=e.get('_target') or _live_wolf_target(e,player,state)
-        if not target: return False
-        target_ref=target['ref']
-        tx=target_ref.x if hasattr(target_ref,'x') else target_ref.get('x',e['ref']['x'])
-        ty=target_ref.y if hasattr(target_ref,'y') else target_ref.get('y',e['ref']['y'])
-        td=_live_dist_xy(e['ref']['x'],e['ref']['y'],tx,ty)
-        if e['energy']>=LIVE_WOLF_BITE_COST and td<=1.25:
-            e['energy']-=LIVE_WOLF_BITE_COST; e['last_action']='teeth dig'
-            if target['kind']=='player':
-                _live_damage_player(player,max(1,e.get('atk',3)),e,msg,'teeth dig')
-            else:
-                dmg=max(1,e.get('atk',3)); target_ref['hp']=max(0,target_ref.get('hp',1)-dmg)
-                msg.append(f"🐺 Wolf teeth dig {_live_label(target_ref.get('type','prey'))} for {dmg} HP")
-                if target_ref['hp']<=0:
-                    _live_predator_kill(e, target_ref, state['world'], msg)
-            e['_target']=None
-            return True
-        return False
-    if typ in ('grot','grot_leader'):
-        if e['blind']:
-            return False
-
-        # At close range a grot should burn its energy pool through real moves,
-        # preferring the cheaper bite over kick/punch when it can.
-        if d<=1.1:
-            if e['energy']>=LIVE_GROT_BITE_COST:
-                e['energy']-=LIVE_GROT_BITE_COST; e['last_action']='teeth dig'
-                _live_damage_player(player,LIVE_GROT_BITE_DAMAGE,e,msg,'teeth dig'); return True
-            if e['energy']>=LIVE_KICK_COST:
-                e['energy']-=LIVE_KICK_COST; e['last_action']='kick'
-                _live_damage_player(player,5,e,msg,'kick')
-                return True
-            if e['energy']>=LIVE_PUNCH_COST:
-                e['energy']-=LIVE_PUNCH_COST; e['last_action']='punch'
-                _live_damage_player(player,2,e,msg,'punch')
-                return True
-
-        # Keep a dirt supply when it can meaningfully throw it.
-        _live_enemy_grab_dirt(e,state['world'])
-        if e['dirt'] and e['energy']>=25 and 1.2<d<=4.0:
-            dx=1 if player.x>e['ref']['x'] else -1 if player.x<e['ref']['x'] else 0
-            dy=1 if player.y>e['ref']['y'] else -1 if player.y<e['ref']['y'] else 0
-            n=min(5,e['dirt']); e['dirt']-=n; e['energy']-=25
-            _live_projectile_add(state,'enemy',n,e['ref']['x'],e['ref']['y'],dx,dy)
-            e['last_action']='threw dirt'; msg.append(f"👹 Grot throws {n} dirt."); return True
-        return False
-    if e.get('atk',0)>0 and d<=1.25 and e['energy']>=50:
-        e['energy']-=50; e['last_action']='attack'; _live_damage_player(player,e['atk'],e,msg); return True
-    return False
-
-
-def _live_enemy_tick(player,state,msg,now,dt):
-    wolves=[e for e in state['enemies'] if e['hp']>0 and e['type'] in ('wolf','young_wolf')]
-    for e in state['enemies']:
-        if e['hp']<=0 or e['fallen']: continue
-        x,y=e['ref']['x'],e['ref']['y']; blind=e['blind']>0
-        wolf_target=_live_wolf_target(e,player,state) if e['type'] in ('wolf','young_wolf') else None
-        if e['type'] in ('wolf','young_wolf'):
-            e['_target'] = wolf_target
-        else:
-            e['_target'] = None
-        if blind and e['type'] in ('grot','grot_leader'):
-            if random.random()<dt*0.6: e['wander_angle']=random.uniform(0,math.tau)
-            ang=e['wander_angle']; dx,dy=math.cos(ang),math.sin(ang)
-        elif e['type'] in ('wolf','young_wolf'):
-            if wolf_target is None:
-                if random.random()<dt*0.7: e['wander_angle']=random.uniform(0,math.tau)
-                dx,dy=math.cos(e['wander_angle']),math.sin(e['wander_angle'])
-            else:
-                target_ref=wolf_target['ref']
-                tx=target_ref.x if hasattr(target_ref,'x') else target_ref.get('x',x)
-                ty=target_ref.y if hasattr(target_ref,'y') else target_ref.get('y',y)
-                dx,dy=tx-x,ty-y
-        elif e['type'] in ('grot','grot_leader'):
-            dx,dy=player.x-x,player.y-y
-        else:
-            threats=[(_live_dist_xy(x,y,player.x,player.y),player.x,player.y)]
-            animal_type=e['type']
-            vision_radius=float(ANIMAL_DEFS.get(animal_type,{}).get('vision_max',5))
-            predator_radius=max(vision_radius,ANIMAL_SMELL_RADIUS.get(animal_type,0),6.0)
-            own_size=ANIMAL_SIZE.get(animal_type,2)
-            for other in getattr(state['world'],'animals',[]) or []:
-                if other is e['ref'] or other.get('hp',0)<=0:
-                    continue
-                other_type=other.get('type','')
-                threat_dist=_live_dist_xy(x,y,other.get('x',x),other.get('y',y))
-                if other_type in ('wolf','young_wolf','grot','grot_leader'):
-                    if threat_dist<=predator_radius:
-                        threats.append((threat_dist,other['x'],other['y']))
-                elif (ANIMAL_SIZE.get(other_type,own_size)>own_size
-                      and threat_dist<=6.0):
-                    threats.append((threat_dist,other['x'],other['y']))
-            dx,dy=_flee_direction(x,y,((threat[1],threat[2]) for threat in threats))
-        d=math.hypot(dx,dy)
-        # Wolves stop moving once they are in bite range. They now spend their
-        # energy on an actual teeth dig instead of repeatedly closing in.
-        bite_range = 1.18 if e['type'] in ('wolf','young_wolf') else 0.01
-        if d>0.01 and e['energy']>0 and not (e['type'] in ('wolf','young_wolf') and e.get('_target') and d<=bite_range):
-            speed=_live_enemy_speed(e['type'])/(1.5 if blind and e['type'] in ('wolf','young_wolf') else 1.0)
-            desired=max(0.0,d-bite_range) if e['type'] in ('wolf','young_wolf') and e.get('_target') else d
-            step=min(desired,speed*dt)
-            step=min(step,e['energy']/LIVE_MOVE_COST)
-            e['ref']['x']+=dx/d*step; e['ref']['y']+=dy/d*step
-            e['energy']=max(0,e['energy']-step*LIVE_MOVE_COST)
-        if now>=e['ai_next'] and e['energy']>0:
-            if _live_enemy_attack(e,player,state,msg): e['ai_next']=now+0.18
-            else: e['ai_next']=now+0.08
-
-
-def _live_graphics_cluster_icon(cl):
-    """Use the exact resource emoji mapping used by graphics mode."""
-    item = cl.get('real_item', '')
-    meta = cl.get('meta', {})
-    if meta.get('is_burning'):
-        return '🔥'
-    if meta.get('is_ash'):
-        return '💨'
-    if item == 'dirt':
-        return GRID_DIRT
-    if item == 'wood':
-        return GRID_TREE
-    if item == 'rock':
-        return GRID_ROCK
-    if item in ('fresh_water', 'dirty_water', 'freezing_water', 'arctic_water',
-                 'freezing_dirty_water', 'water'):
-        return GRID_WATER
-    if item.endswith('berries') or item.endswith('berry') or 'berr' in item:
-        return _cluster_icon(cl, GRID_BERRIES)
-    if 'mushroom' in item or item in ('black_trumpets', 'spotted_mushrooms'):
-        return _cluster_icon(cl, GRID_MUSHROOMS)
-    if item in ('fibergrass', 'snow'):
-        return _cluster_icon(cl, GRID_GRASS)
-    if item.startswith('moss'):
-        return _cluster_icon(cl, GRID_MOSS)
-    if item == 'catnip':
-        return _cluster_icon(cl, GRID_CATNIP)
-    return _cluster_icon(cl, GRID_RESOURCE)
-
-
-def _live_player_icon(player):
-    """Mirror the graphics-mode player emoji selection."""
-    now = time.time()
-    moving = (now - getattr(player, 'last_move_time', 0.0)) < 0.75
-    has_spear = bool(getattr(player, 'spear_type', None) and getattr(player, 'spear_dur', 0) > 0)
-    has_shield = bool(getattr(player, 'shield_type', None) and getattr(player, 'shield_dur_blocks', 0) > 0)
-    if moving:
-        return '🚶'
-    if has_shield:
-        return '🛡️'
-    if has_spear:
-        return '🗡️'
-    return '🧍'
-
-
-def _live_show_help(term):
-    """Full in-combat rules screen for the H key."""
-    lines = [
-        '⚔️ LIVE COMBAT — HELP',
-        '─' * 60,
-        '',
-        'THE BASIC RULE',
-        '  You and the enemies act at the same time. There are no separate',
-        '  player/enemy turns. Your combat energy and theirs drain as they act.',
-        '  When YOU hit 0 energy, the combat cycle immediately resets.',
-        '  If every living enemy reaches 0 first, the cycle also resets.',
-        '  A reset restores everyone to their full combat-energy pool.',
-        '',
-        'MOVEMENT',
-        '  Arrow keys — move one coordinate. Movement costs combat energy.',
-        '  You can move while enemies move and attack at the same time.',
-        '',
-        'DIRT',
-        '  G — grab dirt while standing on a dirt patch; hold up to 10.',
-        '  T — throw all carried dirt. The dust travels one coordinate every',
-        '      0.5 seconds and expands as it travels. It can be dodged.',
-        '  A direct hit blinds an enemy for the blind duration. Ninjas are immune.',
-        '  A wolf can still smell you while blinded, but takes 1.5× as long',
-        '  to reach you. A grot loses track of you and wanders blindly.',
-        '  Early/dense dirt hits deal extra damage: 5 damage per dirt after',
-        '  the first, doubled while the cloud is still expanding.',
-        '',
-        'UNARMED ATTACKS',
-        '  S — punch. Costs 25 energy. Reach: 1.5 coordinates.',
-        '      The enemy may fall or take 2 damage.',
-        '  F — Punch Bam. Costs 80 energy and deals 10 damage to a fallen',
-        '      enemy on your coordinate.',
-        '  I — kick. Costs 35 energy. Range: 1.5 coordinates.',
-        '      The enemy may fall or take 5 damage.',
-        '',
-        'SPEAR',
-        '  E — spear stab. Normal reach is 2 coordinates.',
-        '  A — spear throw. Opens the normal spear aim minigame.',
-        '  S then T quickly — extended spear move, with longer reach.',
-        '  The attack animation shows the spear reaching into the world.',
-        '',
-        'ENEMIES',
-        '  🐺 Wolves use teeth dig for 80 energy and coordinate as a pack.',
-        '     They judge meat value versus hunting trouble; they may ignore you.',
-        '     Grots count as possible meat, so wolves may turn toward a grot instead.',
-        '  👹 Grots can punch, kick, teeth dig (45 energy / 6 damage),',
-        '     throw up to 5 dirt, and react to blindness normally.',
-        '  A fallen enemy remains on the ground until the current cycle ends.',
-        '  It does NOT disappear. Use the opening to make your next move.',
-        '',
-        'OTHER',
-        '  B — block for the rest of the current cycle (costs energy).',
-        '  SPACE — spend the rest of your current energy immediately.',
-        '  Q — attempt to flee.',
-        '',
-        'Press any key to return to combat.'
-    ]
-    try:
-        term.show_menu(lines)
-    except Exception:
-        return
-    try:
-        term.get_key_no_flush(0.5)
-    except Exception:
-        pass
-
-
-def _live_render(term, player, state, logs):
-    """Live combat uses the classic 20x20 grid renderer for presentation;
-    only the underlying mechanics are the new simultaneous-energy engine."""
-    world = state['world']
-    gx,gy=_world_tile(player.x,player.y)
-    ox=gx-GRID_SIZE//2; oy=gy-GRID_SIZE//2
-    for wx in range(ox, ox + GRID_SIZE):
-        for wy in range(oy, oy + GRID_SIZE):
-            world._load(wx, wy)
-    entities=[a for a in getattr(world,'animals',[]) or []
-              if a.get('hp',0)>0 and math.hypot(a.get('x',0)-player.x,a.get('y',0)-player.y)<=12.0]
-    # Always include every current combatant, even if movement has carried it just
-    # outside the ordinary surrounding-animal radius.
-    for e in state.get('enemies',[]):
-        if e.get('ref') is not None and e.get('ref') not in entities:
-            entities.append(e.get('ref'))
-        r=e.get('ref') or {}
-        r['hp']=max(0,e.get('hp',r.get('hp',0)))
-        r['_live_fallen']=bool(e.get('fallen'))
-        r['_live_blind']=bool(e.get('blind'))
-    _grid_render(term,player,state['world'],entities,ox,oy,state['round'],int(max(0,state.get('player_energy',0))),
-                 logs[-8:], '[↑]up [↓]dn [←]lt [→]rt [G]grab [T]dirt [S]punch [F]bam [I]kick [E]stab [A]throw [H]help [Q]flee',
-                 getattr(player,'last_move_time',0.0),time.time(),live_state=state)
-
-
-def _live_spear_anim(term,player,state,dx,dy,length):
-    state['animation']={'dx':dx,'dy':dy,'length':length,'until':time.time()+LIVE_SPEAR_ANIM}
-    while time.time()<state['animation']['until']:
-        _live_render(term,player,state,state.get('_logs',[])); time.sleep(0.025)
-    state['animation']=None
-
-
-def _live_break_spear(player,msg):
-    if player.spear_type and player.spear_dur<=0:
-        s=player.spear_type; player.inventory[s]=max(0,player.inventory.get(s,0)-1)
-        player.spear_type=None; player.spear_dur=0; player.spear_poison_strikes=0; player.spear_poison_throw=False
-        msg.append(f"💥 {s.replace('_',' ').title()} broke!")
-
-
-def _live_spear_stab(term,player,world,state,msg,extended=False):
-    cost=LIVE_SPEAR_EXTENDED_COST if extended else LIVE_SPEAR_STAB_COST
-    if not player.spear_type or player.spear_dur<=0 or player.inventory.get(player.spear_type,0)<=0:
-        msg.append('❌ No spear equipped.'); return
-    if state['player_energy']<cost: msg.append(f'⚡ Not enough combat energy (need {int(cost)}).'); return
-    reach=3.0 if extended else 2.0; t=_live_front_enemy(player,state['enemies'],reach)
-    if not t: msg.append(f'❌ No enemy in spear range ({int(reach)} tiles).'); return
-    state['player_energy']-=cost
-    dx=1 if t['ref']['x']>player.x+0.15 else -1 if t['ref']['x']<player.x-0.15 else 0
-    dy=1 if t['ref']['y']>player.y+0.15 else -1 if t['ref']['y']<player.y-0.15 else 0
-    if dx==0 and dy==0: dx,dy=state.get('facing',(1,0))
-    _live_spear_anim(term,player,state,dx,dy,int(reach))
-    sd=SPEAR_DEFS.get(player.spear_type,{})
-    mult=2 if player.spear_poison_strikes>0 else 1
-    dmg=int(sd.get('strike',0)*mult)
-    if extended: dmg=max(dmg+2,int(round(dmg*1.35)))
-    dmg=max(1,dmg-max(0,t.get('def',0)//3)); t['hp']=max(0,t['hp']-dmg); _live_sync_enemy(t)
-    player.spear_dur-=int(sd.get('strike_cost',max(1,dmg)))
-    if player.spear_poison_strikes>0:
-        player.spear_poison_strikes-=1
-        if player.spear_poison_strikes==0: player.spear_poison_throw=False
-    try:
-        if getattr(player,'sound',None) and player.sound.enabled: player.sound.play_attack()
-    except Exception: pass
-    _flash_hit(t['type']); tag=' EXTENDED' if extended else ''
-    msg.append(f"⚔️ Spear{tag} hits {_live_label(t['type'])} for {dmg} HP ({max(0,t['hp']):.0f} left)")
-    _live_break_spear(player,msg)
-    if t['hp']<=0:
-        try: resolve_animal_kill(player,world,t['ref'],msg)
-        except Exception: pass
-
-
-def _live_spear_throw(term,player,world,state,msg):
-    if not player.spear_type or player.spear_dur<=0 or player.inventory.get(player.spear_type,0)<=0:
-        msg.append('❌ No spear equipped to throw.'); return
-    if state['player_energy']<LIVE_SPEAR_THROW_COST:
-        msg.append('⚡ Not enough combat energy (need 40).'); return
-    t=_live_pick_enemy(player,state['enemies'])
-    if not t: return
-    state['player_energy']-=LIVE_SPEAR_THROW_COST
-    dist=_live_dist_xy(player.x,player.y,t['ref']['x'],t['ref']['y'])
-    _show_spear_tutorial_if_first(term,player,player.spear_type)
-    zone,cancelled=run_spear_minigame(term,player,t['type'],dist,player.spear_type)
-    if cancelled:
-        state['player_energy']+=LIVE_SPEAR_THROW_COST; msg.append('🛑 Throw cancelled. Spear held.'); return
-    sd=SPEAR_DEFS.get(player.spear_type,{})
-    player.spear_dur-=min(sd.get('throw_cost',20),player.spear_dur)
-    if zone=='miss': msg.append(f"💨 Spear throw misses {_live_label(t['type'])}.")
-    else:
-        mult=2 if player.spear_poison_throw else 1
-        dmg=max(1,int(sd.get('throw',0)*{'head':1.5,'body':1,'graze':0.5,'near_miss':0.25}.get(zone,0)*mult))
-        t['hp']=max(0,t['hp']-dmg); _live_sync_enemy(t); _flash_hit(t['type'])
-        msg.append(f"🗡️ Spear throw — {zone.replace('_',' ')}! {_live_label(t['type'])} -{dmg} HP")
-        if player.spear_poison_throw: player.spear_poison_throw=False; player.spear_poison_strikes=0
-        if t['hp']<=0:
-            try: resolve_animal_kill(player,world,t['ref'],msg)
-            except Exception: pass
-    if player.spear_type=='ice_spear': player.spear_dur=0
-    _live_break_spear(player,msg)
-
-
-def run_live_combat(term,player,world,initial_targets,msg_out=None):
-    """Live/simultaneous combat under the classic 20x20 grid presentation.
-    A new cycle starts when the player reaches 0 energy OR every living enemy
-    reaches 0 energy; everyone is then restored to full combat energy."""
-    if msg_out is None: msg_out=[]
-    sound=getattr(term,'sound',None) or getattr(player,'sound',None)
-    if sound and sound.enabled:
-        try: sound.start_combat_bgm()
-        except Exception: pass
-    enemies=[]; seen=set()
-    for ref in list(initial_targets or []):
-        if not isinstance(ref,dict) or ref.get('hp',0)<=0 or id(ref) in seen: continue
-        if ref not in world.animals: continue
-        seen.add(id(ref)); enemies.append(_live_enemy(ref,len(enemies)))
-    if not enemies:
-        msg_out.append('❌ No living enemies to fight.'); return False
-    now=time.time()
-    for t in player.active_tasks: t['paused_remaining']=max(0,t['end']-now)
-    ga=getattr(player,'gather_all',None)
-    if ga and 'paused_remaining' not in ga: ga['paused_remaining']=max(0,ga['end']-now)
-    state={'engine':'live','enemies':enemies,'world':world,'round':1,'player_energy':100.0,
-           'player_blind':0,'blackout':False,'blocking':False,'dirt':0,'facing':(1,0),
-           'projectiles':[],'animation':None,'last_frame':now,'last_move':0.0,
-           'combo_until':0.0,'_logs':[]}
-    player.in_combat=True; player.combat=state
-    _flee_cat_on_combat(player,world,[])
-    logs=['⚔️ LIVE COMBAT! Both sides act at the same time.',
-          '🛈 Arrows move | G grab | T dirt | S punch | F bam | I kick | E spear | A throw | B block | Space pass | Q flee']
-    state['_logs']=logs
-    _live_render(term,player,state,logs)
-    try:
-        while player.in_combat and player.combat is state:
-            now=time.time(); dt=min(0.08,max(0.0,now-state['last_frame'])); state['last_frame']=now
-            _live_enemy_tick(player,state,logs,now,dt)
-            _live_projectile_tick(player,state,now,logs)
-            live=[e for e in state['enemies'] if e['hp']>0]
-            if not live: logs.append('✅ All enemies defeated! Combat ended.'); break
-            if player.health<=0: break
-            if state['player_energy']<=0:
-                _live_round_up(state,logs,'you reached 0 energy')
-            else:
-                active_enemies=[e for e in live if not e.get('fallen')]
-                if active_enemies and all(e['energy']<=0 for e in active_enemies):
-                    _live_round_up(state,logs,'every active enemy reached 0 energy')
-            key=term.get_key(0.035)
-            if key:
-                k=str(key); kl=k.lower()
-                dirs={'UP':(0,-1),'DOWN':(0,1),'LEFT':(-1,0),'RIGHT':(1,0)}
-                if k in dirs:
-                    if now-state['last_move']>=LIVE_MOVE_COOLDOWN and _live_player_move(player,*dirs[k],state): state['last_move']=now
-                elif kl=='g': _live_grab(player,world,state,logs)
-                elif kl=='t':
-                    if now<=state.get('combo_until',0) and player.spear_type:
-                        _live_spear_stab(term,player,world,state,logs,extended=True); state['combo_until']=0
-                    elif state['dirt']>0:
-                        n=min(10,state['dirt']); state['dirt']-=n; _live_projectile_add(state,'player',n,player.x,player.y,*state['facing'])
-                        logs.append(f'💨 You throw {n} dirt. It travels 1 coordinate every 0.5s.')
-                    else: logs.append('🫳 No dirt. Press G on a dirt patch first.')
-                elif kl=='s':
-                    if state['player_energy']<LIVE_PUNCH_COST: logs.append('⚡ Punch costs 25 combat energy.')
-                    else:
-                        t=_live_pick_enemy(player,state['enemies'],LIVE_PUNCH_RANGE)
-                        if not t: logs.append(f"👊 No enemy within {LIVE_PUNCH_RANGE:g} tiles to punch.")
-                        else:
-                            state['player_energy']-=25; state['combo_until']=now+LIVE_COMBO_WINDOW if player.spear_type else 0
-                            if t['energy']<25 or random.random()<0.5:
-                                t['fallen']=1; t['energy']=0
-                                logs.append(f"👊 You knock {_live_label(t['type'])} down — MAKE YOUR MOVE!")
-                            else:
-                                t['hp']=max(0,t['hp']-2); _live_sync_enemy(t); logs.append(f"👊 You punch {_live_label(t['type'])} for 2 HP.")
-                                if t['hp']<=0:
-                                    try: resolve_animal_kill(player,world,t['ref'],logs)
-                                    except Exception: pass
-                elif kl=='i':
-                    if state['player_energy']<LIVE_KICK_COST: logs.append('⚡ Kick costs 35 combat energy.')
-                    else:
-                        t=_live_front_enemy(player,state['enemies'],LIVE_KICK_RANGE)
-                        if not t: logs.append(f'🦵 No enemy within {LIVE_KICK_RANGE:g} tiles to kick.')
-                        else:
-                            state['player_energy']-=35; r=random.random()
-                            if r<0.4:
-                                t['fallen']=1; t['energy']=0
-                                logs.append(f"🦵 You kick {_live_label(t['type'])} down — MAKE YOUR MOVE!")
-                            elif r<0.7: t['energy']=max(0,t['energy']-40); logs.append(f"🦵 {_live_label(t['type'])} spends 40 energy staying upright.")
-                            else:
-                                t['hp']=max(0,t['hp']-5); _live_sync_enemy(t); logs.append(f"🦵 You kick {_live_label(t['type'])} for 5 HP.")
-                                if t['hp']<=0:
-                                    try: resolve_animal_kill(player,world,t['ref'],logs)
-                                    except Exception: pass
-                elif kl=='f':
-                    if state['player_energy']<LIVE_PUNCH_BAM_COST:
-                        logs.append('⚡ Punch Bam costs 80 combat energy.')
-                    else:
-                        t=_live_pick_enemy(player,state['enemies'],0.45)
-                        if not t or not t.get('fallen'):
-                            logs.append('👊 Punch Bam requires a fallen enemy in your square.')
-                        else:
-                            state['player_energy']-=LIVE_PUNCH_BAM_COST
-                            t['hp']=max(0,t['hp']-LIVE_PUNCH_BAM_DAMAGE); _live_sync_enemy(t)
-                            logs.append(f"👊💥 Punch Bam hits {_live_label(t['type'])} for 10 HP.")
-                            if t['hp']<=0:
-                                try: resolve_animal_kill(player,world,t['ref'],logs)
-                                except Exception: pass
-                elif kl=='e': _live_spear_stab(term,player,world,state,logs,extended=False)
-                elif kl=='a': _live_spear_throw(term,player,world,state,logs)
-                elif kl=='b':
-                    if state['player_energy']<LIVE_BLOCK_COST: logs.append('⚡ Block costs 30 combat energy.')
-                    else: state['player_energy']-=30; state['blocking']=True; logs.append('🛡️ You brace for the rest of this round.')
-                elif k in (' ','ENTER') or kl=='p': state['player_energy']=0; logs.append('⏩ You spend the rest of your combat energy.')
-                elif kl=='q':
-                    t=_live_pick_enemy(player,state['enemies']); d=_live_dist_xy(player.x,player.y,t['ref']['x'],t['ref']['y']) if t else 99
-                    if d>2.5 or random.random()<0.4:
-                        player.flee_until=time.time()+5; logs.append('🏃 You escape the battle.'); break
-                    logs.append('🏃 You try to flee, but the enemy stays on you!'); state['player_energy']=max(0,state['player_energy']-15)
-                elif kl in ('?','h'):
-                    _live_show_help(term)
-                    logs.append('📖 Combat help closed. Make your move.')
-            state['blackout']=state.get('player_blind',0)>0
-            state['_logs']=logs[-8:]
-            _live_render(term,player,state,logs[-5:])
-            if len(logs)>40: del logs[:-20]
-            if player.health<=0: break
-    except (KeyboardInterrupt,EOFError):
-        logs.append('🛑 Combat interrupted.')
-    finally:
-        _resume_paused_crafting(player)
-        if sound and sound.enabled:
-            try: sound.stop_combat_bgm()
-            except Exception: pass
-        player.in_combat=False; player.combat=None
-        msg_out.extend(logs[-3:])
-    return player.health>0
-
 # ==================== GRID MODE ====================
 GRID_SIZE   = 20
-GRID_EMPTY  = "🟫"   # Plain Forest ground is dirt; resource clusters overlay it.
-GRID_DIRT   = "🟫"   # Gatherable dirt patches use the same terrain tile.
-GRID_GROUND_ARCTIC = "🟦"   # Ordinary Arctic ground is ice.
+GRID_EMPTY  = "🟫"
 GRID_TREE   = "🌲"
 GRID_ROCK   = "🪨"
 GRID_CATNIP = "🌿"
@@ -13690,29 +12517,52 @@ def _grid_terrain_factor(world, x, y):
 
 
 def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, player_energy,
-                  log_lines, action_hint, last_move_time, grid_start_t=None, live_state=None):
+                  log_lines, action_hint, last_move_time, grid_start_t=None):
     """Render the 20x20 grid plus sidebar into the terminal."""
     GS = GRID_SIZE
     # Build cell map: (i,j) → (emoji, z)
     cells = {}  # key: (gi,gj) 0-based grid indices → (emoji, z)
 
-    # Background: Forest ground is dirt; Arctic ground is ice.
-    # Determine it per tile so the combat map remains correct at biome borders.
+    # Background
     for gj in range(GS):
         for gi in range(GS):
-            wx, wy = grid_ox + gi, grid_oy + gj
-            bg = _map_ground_icon(wx, wy)
-            cells[(gi,gj)] = (bg, 0)
+            cells[(gi,gj)] = (GRID_EMPTY, 0)
 
     # World resources/clusters in view
     for (cx,cy), cl in world.clusters.items():
         gi, gj = int(cx) - grid_ox, int(cy) - grid_oy
         if not (0<=gi<GS and 0<=gj<GS): continue
-        item = cl.get("real_item") or cl.get("meta", {}).get("item", "")
-        icon = _map_cluster_icon(cl)
-        z = 50 if item == "wood" else 35 if item == "dirt" else 30 if item == "rock" else 20
-        if cells.get((gi,gj),(None,0))[1] < z:
-            cells[(gi,gj)] = (icon, z)
+        item = cl.get("real_item") or cl.get("meta",{}).get("item","")
+        if item == "wood":  # 1×1 to match graphics-mode density
+            if cells.get((gi,gj),(None,0))[1] < 50:
+                cells[(gi,gj)] = (GRID_TREE, 50)
+        elif item == "rock":  # 1×1 to match graphics-mode density
+            if cells.get((gi,gj),(None,0))[1] < 30:
+                cells[(gi,gj)] = (GRID_ROCK, 30)
+        elif item == "catnip":
+            if cells.get((gi,gj),(None,0))[1] < 20:
+                cells[(gi,gj)]=(GRID_CATNIP,20)
+        else:
+            # Show the same kinds of resources visible from the main world
+            # screen instead of reducing grid mode to trees and rocks.
+            source_item = cl.get("meta", {}).get("item", item)
+            category = cl.get("category", "")
+            if (source_item == "poisonous_berry" or item == "poisonous_berry") and cl.get("is_identified"):
+                icon = "💀"  # U+1F480 skull — 2-wide; ☠️ U+2620 is 1-wide in many terminals
+            elif source_item in ("berries", "wild_berries", "sweet_berries", "sour_berries", "glowing_berries", "frostberry", "shimmer_frostberry", "poisonous_berry") or item in BERRY_ITEMS:
+                icon = GRID_BERRIES
+            elif source_item in ("mushrooms", "mushroom_death_cap", "mystery_mushroom", "black_trumpets", "spotted_mushrooms") or item in MUSHROOM_ITEMS:
+                icon = GRID_MUSHROOMS
+            elif source_item in ("water", "arctic_water") or category == "water" or item in ("fresh_water", "dirty_water", "freezing_water", "freezing_dirty_water"):
+                icon = GRID_WATER
+            elif source_item in ("fibergrass", "snow"):
+                icon = GRID_GRASS
+            elif str(source_item).startswith("moss") or str(item).startswith("moss"):
+                icon = GRID_MOSS
+            else:
+                icon = GRID_RESOURCE
+            if cells.get((gi,gj),(None,0))[1] < 20:
+                cells[(gi,gj)]=(icon,20)
 
     # Animation timing
     _now_a = time.time()
@@ -13763,22 +12613,6 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
                     if cells.get(p,(None,0))[1] < z:
                         cells[p]=(icon,z)
 
-    # Live-combat overlays: the classic renderer remains the presentation layer.
-    if live_state is not None:
-        _now_live = time.time()
-        for proj in live_state.get('projectiles', []):
-            for wx, wy in _live_projectile_cells(proj, _now_live):
-                li, lj = wx - grid_ox, wy - grid_oy
-                if 0 <= li < GS and 0 <= lj < GS:
-                    cells[(li, lj)] = ('💨', 90)
-        anim = live_state.get('animation')
-        if anim:
-            for k in range(1, anim['length'] + 1):
-                li = int(round(player.x)) + anim['dx'] * k - grid_ox
-                lj = int(round(player.y)) + anim['dy'] * k - grid_oy
-                if 0 <= li < GS and 0 <= lj < GS:
-                    cells[(li, lj)] = ('🗡️', 95)
-
     # Player icon
     now = time.time()
     moving = (now - last_move_time) < 0.75
@@ -13802,34 +12636,17 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     hp_bar = f"❤️{int(player.health)}/{int(player.max_health)}"
     spear_lbl = (player.spear_type or "none").replace("_"," ")
     shield_lbl = (player.shield_type or "none").replace("_"," ")
-    if live_state is not None:
-        header_text = f"  ⚔️ GRID MODE  Cycle {round_num}  Energy:{player_energy}/100  {hp_bar}  🫳 Dirt:{int(live_state.get('dirt', 0))}/10  🗡️{spear_lbl}  🛡️{shield_lbl}"
-    else:
-        header_text = f"  ⚔️ GRID MODE  Round {round_num}  Energy:{player_energy}  {hp_bar}  🗡️{spear_lbl}  🛡️{shield_lbl}"
-    header = vfit(header_text, TERM_WIDTH)
+    header = vfit(f"  ⚔️ GRID MODE  Round {round_num}  Energy:{player_energy}  {hp_bar}  🗡️{spear_lbl}  🛡️{shield_lbl}", TERM_WIDTH)
     sep = "─" * TERM_WIDTH
     lines = [header, sep]
 
     sidebar_content = []
-    hostile = [e for e in entities if e.get("atk",0)>0 or e.get("type","") in ("grot","grot_leader","deer","antelope","wolf","young_wolf")]
-    live_by_id = {}
-    if live_state is not None:
-        live_by_id = {id(le.get('ref')): le for le in live_state.get('enemies', []) if le.get('ref') is not None}
+    hostile = [e for e in entities if e.get("atk",0)>0 or e.get("type","") in ("grot","grot_leader","deer","antelope")]
     for e in hostile[:8]:
         etype = e.get("type","?").replace("_"," ").title()
         ehp = e.get("hp",0); emhp = e.get("max_hp",ehp)
         ex2,ey2=int(round(e["x"])),int(round(e["y"]))
-        le = live_by_id.get(id(e))
-        if le is not None:
-            sidebar_content.append(f"{etype:<12} HP:{int(le.get('hp',ehp))}/{int(le.get('max_hp',emhp))} ⚡{int(le.get('energy',0))}/{int(le.get('energy_max',0))}")
-            if le.get('type') in ('grot','grot_leader'):
-                sidebar_content.append(f"  dirt {int(le.get('dirt',0))}/5")
-            if le.get('blind'):
-                sidebar_content.append('  BLINDED — senses impaired')
-            if le.get('fallen'):
-                sidebar_content.append('  ⬇️ ON FLOOR — MAKE YOUR MOVE!')
-        else:
-            sidebar_content.append(f"{etype:<12} HP:{ehp}/{emhp} @{ex2},{ey2}")
+        sidebar_content.append(f"{etype:<12} HP:{ehp}/{emhp} @{ex2},{ey2}")
     while len(sidebar_content) < GS:
         sidebar_content.append("")
     # Copy log lines into sidebar tail, wrapping long entries
@@ -13837,20 +12654,9 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     for ll in log_lines:
         for frag in vwrap(ll, SIDEBAR_W):
             wrapped_log.append(frag)
-    critical = []
-    if live_state is not None:
-        for le in live_state.get('enemies', []):
-            if le.get('fallen') and le.get('hp', 0) > 0:
-                critical.append(f"⬇️ {_live_label(le.get('type'))} ON FLOOR — MAKE YOUR MOVE NOW!")
-        if live_state.get('player_blind', 0):
-            critical.append('⬛ YOUR VISION IS OBSCURED THIS CYCLE')
-    reserve = min(GS, len(critical))
-    log_slots = max(0, GS - reserve)
-    wrapped_tail = wrapped_log[-min(6, log_slots):] if log_slots else []
+    wrapped_tail = wrapped_log[-6:]
     for idx, ll in enumerate(wrapped_tail):
-        sidebar_content[log_slots - len(wrapped_tail) + idx] = vtrunc(ll, SIDEBAR_W)
-    for idx, line in enumerate(critical[-reserve:]):
-        sidebar_content[GS - reserve + idx] = vtrunc(line, SIDEBAR_W)
+        sidebar_content[GS - 6 + idx] = vtrunc(ll, SIDEBAR_W)
 
     for gj in range(GS):
         row_cells = [_cell2(cells.get((gi,gj),(GRID_EMPTY,0))[0]) for gi in range(GS)]
@@ -13871,10 +12677,7 @@ def _grid_render(term, player, world, entities, grid_ox, grid_oy, round_num, pla
     except Exception:
         pass
 
-    # Repaint in-place instead of clearing the whole terminal. This keeps the
-    # map transition smooth and matches the graphics-mode behavior: same tile
-    # set, no destructive full-screen flash to the brown dirt background.
-    sys.stdout.write("\033[H" + "\r\n".join(f"{line}\033[K" for line in lines) + "\033[J")
+    sys.stdout.write("\033[2J\033[H" + "\r\n".join(lines))
     sys.stdout.flush()
 
 
@@ -17161,10 +15964,6 @@ def main():
 
             if not paused:
                 res = player.update_passive()
-                try:
-                    weather.tick_realtime(player, world, msg)
-                except Exception:
-                    pass
                 unlocked = was_crafting and not player.active_tasks
                 if unlocked and sound and sound.enabled: sound.stop_craft()
                 if unlocked and getattr(player, "qt_last_finished", None):
@@ -17188,22 +15987,20 @@ def main():
                         nearby_targets = [a for a in world.animals if math.hypot(a["x"]-player.x, a["y"]-player.y) <= 12.0]
                         if not nearby_targets:
                             nearby_targets = grot_sees
-                        msg.append("👹 A grot spotted you! Entering LIVE COMBAT!")
+                        msg.append("👹 A grot spotted you! Entering GRID MODE!")
                         _flee_cat_on_combat(player, world, msg)
                         _unlock_and_show_tutorial(term, player, "grot_combat")
-                        run_live_combat(term, player, world, nearby_targets, msg)
+                        grid_msgs = run_grid_mode(term, player, world, nearby_targets, msg)
+                        for gm in grid_msgs[-3:]: msg.append(gm)
                         msg = msg[-3:]
                     else:
-                        hostile_nearby = [a for a in world.animals
-                                          if a.get("atk",0) > 0
-                                          and math.hypot(a["x"]-player.x, a["y"]-player.y) <= 1.0
-                                          and (a.get("type") not in ("wolf","young_wolf") or a.get("_hunting_player"))]
+                        hostile_nearby = [a for a in world.animals if a.get("atk",0) > 0 and math.hypot(a["x"]-player.x, a["y"]-player.y) <= 1.0]
                         if hostile_nearby and time.time() > player.flee_until:
                             # Pause any active crafting
                             for t in player.active_tasks:
                                 t["paused_remaining"] = max(0, int(t["end"] - time.time()))
                             _flee_cat_on_combat(player, world, msg)
-                            run_live_combat(term, player, world, hostile_nearby, msg)
+                            start_turn_based_combat(player, world, hostile_nearby, msg)
                 if res == "time_shift":
                     icon = "🌙" if player.time_of_day == "night" else "☀️"
                     label = "NIGHT" if player.time_of_day == "night" else "DAY"
@@ -17640,20 +16437,6 @@ def main():
                    and not (player.in_combat and act in COMBAT_EXEMPT):
                     msg.append("😴 Can't do that while resting. Type 'rest' to stop first.")
                     msg = msg[-3:]; rn = True; continue
-
-                # ---- PHYSICAL WEATHER STATUS ----
-                if act in ("weather", "climate", "atmosphere"):
-                    try:
-                        st = weather.status()
-                        if st:
-                            msg.append(f"☀️ Sun {st['received_units']:.1f} energy | {st['rotation_deg']:.1f}° | {'DAY' if st['is_day'] else 'NIGHT'}")
-                            msg.append(f"🌡️ Surface {st['surface_temperature_c']:.1f}°C | humidity {st['humidity']*100:.0f}% | wind {st['wind_speed_m_s']:.1f} m/s")
-                            msg.append(f"⛈️ Rain {st['rain_rate_mm_h']:.2f} mm/h | CAPE {st['cape_j_kg']:.0f} | storm {st['storm_intensity']} | dust {st['dust']:.2f}")
-                            msg.append(f"🌍 CO₂ {st['co2_ppm']:.2f} ppm | CH₄ {st['ch4_ppb']:.1f} ppb | N₂O {st['n2o_ppb']:.2f} ppb | retained {st['atmospheric_retention']:.2f}")
-                        else:
-                            msg.append("⚠️ Physical weather engine unavailable.")
-                    except Exception as _we: msg.append(f"⚠️ Weather diagnostics unavailable: {_we}")
-                    msg = msg[-3:]; rn=True; continue
 
                 # ---- HELP ----
                 if act == "help":
@@ -18269,9 +17052,10 @@ def main():
                     nearby_any = [a for a in world.animals if math.hypot(a["x"]-player.x,a["y"]-player.y)<=12.0]
                     targets = nearby_hostiles if nearby_hostiles else nearby_any
                     if not targets:
-                        msg.append("❌ No animals within 12 tiles for live combat.")
+                        msg.append("❌ No animals within 12 tiles for grid mode.")
                     else:
-                        run_live_combat(term, player, world, targets, msg)
+                        grid_msgs = run_grid_mode(term, player, world, targets, msg)
+                        for gm in grid_msgs[-3:]: msg.append(gm)
                     msg = msg[-3:]
 
                 # ---- HUNT ----
@@ -18285,13 +17069,24 @@ def main():
                     else:
                         hunt_type = (" ".join(parts_hunt)).strip().replace(" ","_")
                     if not hunt_type:
-                        live_targets = [a for a in world.animals
-                                        if math.hypot(a["x"]-player.x,a["y"]-player.y) <= 12.0 and a.get("hp",0)>0]
-                        if not live_targets:
-                            msg.append("❌ No animals nearby. Explore more!")
+                        # Default: enter grid mode against any nearby animals
+                        active_spear = None
+                        for sp in ["advanced_ice_spear","ice_spear","advanced_heavy_spear","heavy_spear","advanced_throwing_spear","throwing_spear","advanced_spear","spear"]:
+                            if player.inventory.get(sp, 0) > 0:
+                                if player.spear_type != sp or player.spear_dur <= 0:
+                                    player.spear_type = sp
+                                    player.spear_dur = SPEAR_DEFS[sp]["dur"]
+                                active_spear = sp; break
+                        if not active_spear or player.spear_dur <= 0:
+                            msg.append("❌ Need a spear to hunt! 'craft spear' (2 planks + 15 rock)")
                         else:
-                            run_live_combat(term, player, world, live_targets, msg)
-                            msg = msg[-3:]
+                            grid_targets = [a for a in world.animals
+                                            if math.hypot(a["x"]-player.x, a["y"]-player.y) <= 12.0]
+                            if not grid_targets:
+                                msg.append("❌ No animals nearby. Explore more!")
+                            else:
+                                run_grid_mode(term, player, world, grid_targets, msg)
+                                msg = msg[-3:]
                     else:
                         # Find best available spear
                         active_spear = None
@@ -18301,8 +17096,8 @@ def main():
                                     player.spear_type = sp
                                     player.spear_dur = SPEAR_DEFS[sp]["dur"]
                                 active_spear = sp; break
-                        if do_throw and (not active_spear or player.spear_dur <= 0):
-                            msg.append("❌ Need a spear to throw. Craft one first.")
+                        if not active_spear or player.spear_dur <= 0:
+                            msg.append("❌ Need a spear to hunt! 'craft spear' (2 planks + 15 rock)")
                         elif hunt_type not in ANIMAL_DEFS:
                             msg.append(f"❓ Unknown animal '{hunt_type.replace('_',' ')}'. Try: rabbit, squirrel, salmon, seal, penguin")
                         else:
@@ -18318,7 +17113,7 @@ def main():
                                 else:
                                     nearby.sort(key=lambda z: z[1])
                                     target, dist = nearby[0]
-                                    sdef = SPEAR_DEFS.get(active_spear, {})
+                                    sdef = SPEAR_DEFS[active_spear]
                                     # Vision check: animal may flee before you act
                                     vision = random.triangular(0, target.get("vision_max", adef["vision_max"]), target.get("vision_peak", adef["vision_peak"]))
                                     if dist < vision and random.random() < 0.5:
@@ -18326,23 +17121,16 @@ def main():
                                         msg.append(f"😱 {hunt_type.replace('_',' ').title()} spotted you and fled! ({dist:.1f} tiles away)")
                                     else:
                                         hit = True
-                                        if not do_throw and not do_grid:
-                                            live_targets = [a for a in world.animals
-                                                            if a.get("hp",0)>0 and a.get("type") == hunt_type
-                                                            and math.hypot(a["x"]-player.x,a["y"]-player.y) <= 12.0]
-                                            run_live_combat(term, player, world, live_targets or [target], msg)
-                                            msg = msg[-3:]
-                                            hit = False
-                                        elif do_grid:
+                                        if do_grid:
                                             # Pull all animals of same type (or grots) within 12 tiles
                                             grid_targets = [a for a in world.animals
                                                             if (a["type"] == hunt_type or a.get("is_grot")) and
                                                             math.hypot(a["x"]-player.x, a["y"]-player.y) <= 12.0]
                                             if not grid_targets:
                                                 grid_targets = [target]
-                                            run_live_combat(term, player, world, grid_targets, msg)
+                                            run_grid_mode(term, player, world, grid_targets, msg)
                                             msg = msg[-3:]
-                                            hit = False  # live combat handles its own kills
+                                            hit = False  # grid mode handles its own kills
                                         elif do_throw:
                                             if sound and sound.enabled:
                                                 sound.play_spear_throw()
@@ -18717,10 +17505,6 @@ def main():
                             msg.append("❌ Need 1 Fire Fuel (craft: 1 oil + 50 wood at woodworking_station).")
                         else:
                             player.inventory["fire_fuel"] -= 1
-                            try:
-                                weather.record_combustion("burn_oil", 1.0)
-                            except Exception:
-                                pass
                             player.campfire_fuel += FIRE_FUEL_PARTS
                             msg.append(f"🔥 Campfire lit! {player.campfire_fuel} fuel parts. Type 'rest' to rest safely.")
                         msg = msg[-3:]; continue
@@ -19481,7 +18265,7 @@ def main():
                 # ---- ATTACK (a/s): auto-target nearest, range 2, 10%/tile miss ----
                 elif act in ("a", "attack", "s"):
                     if not getattr(player, "in_combat", False):
-                        msg.append("❌ The combat uses E for spear strike, A for spear throw, S for punch, I for kick, G for dirt, and T for dirt throw. Use 'hunt <animal>' to engage.")
+                        msg.append("❌ The a/s attack command only works in grid combat mode. Use 'hunt <animal>' to engage prey.")
                     elif not player.spear_type or player.spear_dur <= 0 or player.inventory.get(player.spear_type,0) <= 0:
                         msg.append("❌ No spear equipped. Craft a spear first.")
                     else:

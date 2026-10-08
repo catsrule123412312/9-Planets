@@ -24,9 +24,8 @@ jobs:
           --paths "9 Planets Beta"
           --add-data "9 Planets Beta/assets;assets"
           --add-data "9 Planets Beta/weather_engine;weather_engine"
-          --collect-submodules weather_engine
-          --hidden-import weather_engine
-          --hidden-import numpy
+          --collect-all weather_engine
+          --collect-all numpy
           --icon="logo.ico"
           "9 Planets Beta/9_planets.py"
 

@@ -20,17 +20,19 @@ jobs:
 
       - name: Build game with PyInstaller
         run: >
-          pyinstaller --onefile --runtime-hook=hook.py --name "9Planets"
+          pyinstaller --onefile --clean --noconfirm --runtime-hook=hook.py --name "9Planets"
           --paths "9 Planets Beta"
           --add-data "9 Planets Beta/assets;assets"
           --add-data "9 Planets Beta/weather_engine;weather_engine"
-          --collect-all weather_engine
+          --collect-submodules weather_engine
+          --hidden-import weather_engine
+          --hidden-import numpy
           --collect-all numpy
           --icon="logo.ico"
           "9 Planets Beta/9_planets.py"
 
       - name: Build launcher with PyInstaller
-        run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.ico" launcher.py
+        run: pyinstaller --onefile --clean --noconfirm --name "Launch 9 Planets" --icon="logo.ico" launcher.py
 
       - name: Upload Windows Build
         uses: actions/upload-artifact@v4
@@ -54,18 +56,19 @@ jobs:
 
       - name: Build game with PyInstaller
         run: >
-          pyinstaller --onefile --windowed --runtime-hook=hook.py --name "9Planets"
+          pyinstaller --onefile --windowed --clean --noconfirm --runtime-hook=hook.py --name "9Planets"
           --paths "9 Planets Beta"
           --add-data "9 Planets Beta/assets:assets"
           --add-data "9 Planets Beta/weather_engine:weather_engine"
           --collect-submodules weather_engine
           --hidden-import weather_engine
           --hidden-import numpy
+          --collect-all numpy
           --icon="logo.icns"
           "9 Planets Beta/9_planets.py"
 
       - name: Build launcher with PyInstaller
-        run: pyinstaller --onefile --name "Launch 9 Planets" --icon="logo.icns" launcher.py
+        run: pyinstaller --onefile --clean --noconfirm --name "Launch 9 Planets" --icon="logo.icns" launcher.py
 
       - name: Upload macOS Build
         uses: actions/upload-artifact@v4
@@ -89,17 +92,18 @@ jobs:
 
       - name: Build game with PyInstaller
         run: >
-          pyinstaller --onefile --runtime-hook=hook.py --name "9Planets"
+          pyinstaller --onefile --clean --noconfirm --runtime-hook=hook.py --name "9Planets"
           --paths "9 Planets Beta"
           --add-data "9 Planets Beta/assets:assets"
           --add-data "9 Planets Beta/weather_engine:weather_engine"
           --collect-submodules weather_engine
           --hidden-import weather_engine
           --hidden-import numpy
+          --collect-all numpy
           "9 Planets Beta/9_planets.py"
 
       - name: Build launcher with PyInstaller
-        run: pyinstaller --onefile --name "Launch 9 Planets" launcher.py
+        run: pyinstaller --onefile --clean --noconfirm --name "Launch 9 Planets" launcher.py
 
       - name: Upload Linux Build
         uses: actions/upload-artifact@v4
